@@ -230,8 +230,8 @@ export function bucketById(state,id) {
   return state.review.buckets.find(bucket => bucket.id === id) || null;
 }
 
-export function sortedBuckets(state, includeSystem = true) {
-  return state.review.buckets.filter(bucket => includeSystem || !bucket.system).sort((a,b)=>a.order-b.order);
+export function sortedBuckets(state, includeSystem = true, includeArchived = false) {
+  return state.review.buckets.filter(bucket => (includeSystem || !bucket.system) && (includeArchived || bucket.active !== false)).sort((a,b)=>a.order-b.order);
 }
 
 export function assignBucket(state, transactionId, bucketId, rememberRule=false) {

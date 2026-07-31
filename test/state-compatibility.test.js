@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {STATE_SCHEMA_VERSION} from '../js/domain/constants.js';
 import {upgradeStateWithMigration} from '../js/state.js';
 import {legacyV1State} from './helpers.js';
 
@@ -29,7 +30,7 @@ test('V1 UI state is hydrated into the current schema without removing V1 catego
   const result = upgradeStateWithMigration(v1, seed(), {now:'2026-07-31T00:00:00.000Z'});
 
   assert.deepEqual(v1, original);
-  assert.equal(result.state.schemaVersion, 4);
+  assert.equal(result.state.schemaVersion, STATE_SCHEMA_VERSION);
   assert.equal(result.state.app.name, 'Money Moves');
   assert.deepEqual(result.state.categories, original.categories);
   assert.deepEqual(result.state.legacyV1.categories, original.categories);

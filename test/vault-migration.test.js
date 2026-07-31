@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test, {beforeEach} from 'node:test';
-import {V1_LEGACY_STATE_KEY, V1_TEMP_VAULT_KEY, V1_VAULT_KEY, V2_TEMP_VAULT_KEY, V2_VAULT_KEY} from '../js/domain/constants.js';
+import {STATE_SCHEMA_VERSION, V1_LEGACY_STATE_KEY, V1_TEMP_VAULT_KEY, V1_VAULT_KEY, V2_TEMP_VAULT_KEY, V2_VAULT_KEY} from '../js/domain/constants.js';
 import {createVault, deriveKey, readVaultRecord} from '../js/vault.js';
 import {createStateService} from '../js/services/stateService.js';
 import {createVaultRepository} from '../js/services/vaultRepository.js';
@@ -21,7 +21,7 @@ test('a V1 encrypted vault unlocks, migrates to a Money Moves vault, and keeps t
 
   const result = await service().unlock(passphrase);
 
-  assert.equal(result.state.schemaVersion, 4);
+  assert.equal(result.state.schemaVersion, STATE_SCHEMA_VERSION);
   assert.equal(result.state.app.name, 'Money Moves');
   assert.equal(localStorage.getItem(V1_VAULT_KEY), legacyRaw);
   assert.ok(localStorage.getItem(V2_VAULT_KEY));

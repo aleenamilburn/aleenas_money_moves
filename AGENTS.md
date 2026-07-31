@@ -4,7 +4,7 @@
 
 The authoritative product specification is:
 
-- `docs/Money_Moves_PRD_v1.0.docx`
+- `docs/Money_Moves_Product_Requirements_Document_v1.0.docx`
 - `docs/engineering/V1_CODEBASE_AUDIT.md`
 
 Only V1 is currently implemented. Never describe a proposed feature as implemented

@@ -2,9 +2,13 @@ import {parseCsv, rowsToTransactions} from './csv.js';
 import {createVaultRepository} from './services/vaultRepository.js';
 import {createStateService} from './services/stateService.js';
 import {
+  listBuckets, createBucket, updateBucket as updateDomainBucket, reorderBucket as reorderDomainBucket,
+  moveChildBucket, archiveBucket, restoreBucket, queryBucketDetail
+} from './services/bucketService.js';
+import {
   upgradeStateWithMigration, money, monthLabel, availableMonths, availableWeeks, weekLabel,
-  weekStats, reviewQueue, sortedBuckets, assignBucket, addTransactions, addBucket,
-  updateBucket, reorderBucket, moveBucket, monthSummary, debtAccounts,
+  weekStats, reviewQueue, sortedBuckets, assignBucket, addTransactions,
+  monthSummary, debtAccounts,
   rankedDestinations, addVisited, scriptureForMonth, bucketById
 } from './state.js';
 
@@ -22,9 +26,14 @@ let keyMeta = null;
 let saveChain = Promise.resolve();
 let inactivityTimer = null;
 let lastActivity = Date.now();
-let draggedBucketId = null;
 let currentScreen = 'overview';
 let setupState = seed;
+let selectedBucketId = null;
+let expandedBucketIds = new Set();
+let bucketFilters = {from:'',to:'',accountId:'',reviewStatus:'',assignment:'',search:''};
+let editingBucketId = null;
+let movingChildId = null;
+let archivingBucketId = null;
 
 function setMessage(id,message,isError=false) {
   const node=$(id);
@@ -65,9 +74,9 @@ function resetInactivity() {
 async function persist() {
   if (!state || !activeKey || !keyMeta) return;
   const snapshot=JSON.parse(JSON.stringify(state));
-  saveChain=saveChain.then(async()=>{ keyMeta=(await stateService.save(snapshot,activeKey,keyMeta)).meta; })
-    .catch(error=>console.error('Save failed',error));
-  await saveChain;
+  saveChain=saveChain.catch(()=>{}).then(async()=>{ keyMeta=(await stateService.save(snapshot,activeKey,keyMeta)).meta; });
+  try { await saveChain; }
+  catch(error) { console.error('Save failed',error); throw error; }
 }
 
 function humanCategory(value) {
@@ -179,27 +188,88 @@ function renderReview() {
 }
 
 function renderBuckets() {
-  const summary=monthSummary(state);
-  $('bucketBoard').innerHTML=sortedBuckets(state,true).map(bucket=>`<div class="bucket-card" draggable="${!bucket.system}" data-id="${bucket.id}">
-    <div class="drag-handle" aria-hidden="true">${bucket.system?'•':'☰'}</div>
-    <input class="bucket-name" data-id="${bucket.id}" value="${escapeAttr(bucket.name)}" ${bucket.system?'disabled':''}>
-    <select class="bucket-group" data-id="${bucket.id}" ${bucket.system?'disabled':''}>
-      ${['Needs','Wants','Goals','Money movement','System'].map(group=>`<option ${bucket.group===group?'selected':''}>${group}</option>`).join('')}
-    </select>
-    <input class="bucket-target" data-id="${bucket.id}" type="number" min="0" step="1" value="${Number(bucket.target||0)}" ${bucket.system?'disabled':''} title="Monthly target">
-    <div class="bucket-moves"><button data-move="-1" data-id="${bucket.id}" aria-label="Move ${escapeAttr(bucket.name)} up">↑</button><button data-move="1" data-id="${bucket.id}" aria-label="Move ${escapeAttr(bucket.name)} down">↓</button></div>
-  </div>`).join('');
+  const includeArchived=$('showArchivedBuckets').checked;
+  const parents=listBuckets(state,{includeArchived,parentId:null});
+  const activeParents=listBuckets(state,{parentId:null});
+  const selectedMonth=state.monthly.selectedMonth;
+  const periodFilters={from:`${selectedMonth}-01`,to:`${selectedMonth}-31`};
+  $('bucketBoard').innerHTML=parents.length ? parents.map(parent=>{
+    const children=listBuckets(state,{includeArchived,parentId:parent.id});
+    const expanded=expandedBucketIds.has(parent.id);
+    const summary=queryBucketDetail(state,parent.id,periodFilters);
+    const target=parent.targetCents/100;
+    const remaining=Math.max(0,parent.targetCents-summary.rolledUpCents)/100;
+    return `<article class="bucket-family ${parent.active?'':'archived'}" data-id="${parent.id}">
+      <div class="bucket-card parent-bucket">
+        <button class="icon-button" data-expand="${parent.id}" aria-expanded="${expanded}" aria-label="${expanded?'Collapse':'Expand'} ${escapeAttr(parent.name)}">${expanded?'▾':'▸'}</button>
+        <div class="bucket-identity">${editingBucketId===parent.id?`<form class="bucket-rename-form" data-id="${parent.id}"><label>Bucket name<input name="name" value="${escapeAttr(parent.name)}" required></label><button>Save</button><button type="button" data-cancel-bucket-action>Cancel</button></form>`:`<strong>${escapeHtml(parent.name)}</strong><small>${escapeHtml(parent.group)} · ${children.length} child bucket${children.length===1?'':'s'}${parent.active?'':' · Archived'}</small>`}</div>
+        <div class="bucket-total"><strong>${money(summary.rolledUpCents/100)}</strong><small>${money(summary.directCents/100)} direct · ${money(target)} target · ${money(remaining)} remaining</small></div>
+        <div class="bucket-actions">
+          <button data-detail="${parent.id}">View</button><button data-rename="${parent.id}">Rename</button>
+          <button data-order="up" data-id="${parent.id}" aria-label="Move ${escapeAttr(parent.name)} up">↑</button><button data-order="down" data-id="${parent.id}" aria-label="Move ${escapeAttr(parent.name)} down">↓</button>
+          ${parent.protected?'':parent.active?(archivingBucketId===parent.id?`<button data-confirm-archive="${parent.id}">Confirm archive</button><button data-cancel-bucket-action>Cancel</button>`:`<button data-request-archive="${parent.id}" aria-label="Archive ${escapeAttr(parent.name)}">Archive</button>`):`<button data-restore="${parent.id}" aria-label="Restore ${escapeAttr(parent.name)}">Restore</button>`}
+        </div>
+      </div>
+      <div class="bucket-children ${expanded?'':'hidden'}">
+        ${children.map(child=>{
+          const childSummary=queryBucketDetail(state,child.id,periodFilters);
+          return `<div class="bucket-card child-bucket"><span class="tree-line" aria-hidden="true">↳</span><div class="bucket-identity">${editingBucketId===child.id?`<form class="bucket-rename-form" data-id="${child.id}"><label>Bucket name<input name="name" value="${escapeAttr(child.name)}" required></label><button>Save</button><button type="button" data-cancel-bucket-action>Cancel</button></form>`:`<strong>${escapeHtml(child.name)}</strong><small>${child.active?'Child bucket':'Archived child'}</small>`}</div><div class="bucket-total"><strong>${money(childSummary.rolledUpCents/100)}</strong><small>${childSummary.transactionCount} transaction${childSummary.transactionCount===1?'':'s'} · ${money(child.targetCents/100)} target</small></div><div class="bucket-actions"><button data-detail="${child.id}">View</button><button data-rename="${child.id}">Rename</button><button data-order="up" data-id="${child.id}" aria-label="Move ${escapeAttr(child.name)} up">↑</button><button data-order="down" data-id="${child.id}" aria-label="Move ${escapeAttr(child.name)} down">↓</button>${movingChildId===child.id?`<label class="move-parent-label">Parent<select data-move-target="${child.id}">${activeParents.filter(item=>item.id!==child.parentId).map(item=>`<option value="${item.id}">${escapeHtml(item.name)}</option>`).join('')}</select></label><button data-confirm-move="${child.id}">Save move</button><button data-cancel-bucket-action>Cancel</button>`:`<button data-move-child="${child.id}">Move</button>`}${child.active?(archivingBucketId===child.id?`<button data-confirm-archive="${child.id}">Confirm archive</button><button data-cancel-bucket-action>Cancel</button>`:`<button data-request-archive="${child.id}" aria-label="Archive ${escapeAttr(child.name)}">Archive</button>`):`<button data-restore="${child.id}" aria-label="Restore ${escapeAttr(child.name)}">Restore</button>`}</div></div>`;
+        }).join('')}
+        ${parent.active?`<form class="child-bucket-form" data-parent="${parent.id}"><label>New child bucket<input name="name" required placeholder="Child bucket name"></label><label>Monthly target<input name="target" type="number" min="0" step="1" placeholder="0"></label><button>Add child</button></form>`:''}
+      </div>
+    </article>`;
+  }).join('') : '<div class="panel"><p>No parent buckets yet.</p></div>';
 
-  document.querySelectorAll('.bucket-name').forEach(input=>input.addEventListener('change',async()=>{updateBucket(state,input.dataset.id,{name:input.value});await persist();renderAll();}));
-  document.querySelectorAll('.bucket-group').forEach(select=>select.addEventListener('change',async()=>{updateBucket(state,select.dataset.id,{group:select.value});await persist();renderAll();}));
-  document.querySelectorAll('.bucket-target').forEach(input=>input.addEventListener('change',async()=>{updateBucket(state,input.dataset.id,{target:input.value});await persist();renderAll();}));
-  document.querySelectorAll('[data-move]').forEach(button=>button.addEventListener('click',async()=>{moveBucket(state,button.dataset.id,Number(button.dataset.move));await persist();renderBuckets();renderOverview();}));
-  document.querySelectorAll('.bucket-card[draggable="true"]').forEach(card=>{
-    card.addEventListener('dragstart',()=>{draggedBucketId=card.dataset.id;card.classList.add('dragging');});
-    card.addEventListener('dragend',()=>{draggedBucketId=null;card.classList.remove('dragging');});
-    card.addEventListener('dragover',event=>event.preventDefault());
-    card.addEventListener('drop',async event=>{event.preventDefault();if(draggedBucketId){reorderBucket(state,draggedBucketId,card.dataset.id);await persist();renderBuckets();}});
-  });
+  document.querySelectorAll('[data-expand]').forEach(button=>button.addEventListener('click',()=>{const id=button.dataset.expand;expandedBucketIds.has(id)?expandedBucketIds.delete(id):expandedBucketIds.add(id);renderBuckets();}));
+  document.querySelectorAll('[data-detail]').forEach(button=>button.addEventListener('click',()=>{selectedBucketId=button.dataset.detail;renderBucketDetail();$('bucketDetail').scrollIntoView({behavior:'smooth',block:'start'});}));
+  document.querySelectorAll('[data-rename]').forEach(button=>button.addEventListener('click',()=>{editingBucketId=button.dataset.rename;movingChildId=null;archivingBucketId=null;renderBuckets();}));
+  document.querySelectorAll('.bucket-rename-form').forEach(form=>form.addEventListener('submit',async event=>{event.preventDefault();const data=new FormData(form);editingBucketId=null;await performBucketChange(()=>updateDomainBucket(state,form.dataset.id,{name:data.get('name')}));}));
+  document.querySelectorAll('[data-order]').forEach(button=>button.addEventListener('click',async()=>performBucketChange(()=>reorderDomainBucket(state,button.dataset.id,button.dataset.order))));
+  document.querySelectorAll('[data-request-archive]').forEach(button=>button.addEventListener('click',()=>{archivingBucketId=button.dataset.requestArchive;editingBucketId=null;movingChildId=null;setMessage('bucketMessage','Archiving keeps all financial history and can be reversed.');renderBuckets();}));
+  document.querySelectorAll('[data-confirm-archive]').forEach(button=>button.addEventListener('click',async()=>{archivingBucketId=null;await performBucketChange(()=>archiveBucket(state,button.dataset.confirmArchive));}));
+  document.querySelectorAll('[data-restore]').forEach(button=>button.addEventListener('click',async()=>performBucketChange(()=>restoreBucket(state,button.dataset.restore))));
+  document.querySelectorAll('[data-move-child]').forEach(button=>button.addEventListener('click',()=>{movingChildId=button.dataset.moveChild;editingBucketId=null;archivingBucketId=null;renderBuckets();}));
+  document.querySelectorAll('[data-confirm-move]').forEach(button=>button.addEventListener('click',async()=>{const select=document.querySelector(`[data-move-target="${CSS.escape(button.dataset.confirmMove)}"]`);movingChildId=null;if(select?.value) await performBucketChange(()=>moveChildBucket(state,button.dataset.confirmMove,select.value));}));
+  document.querySelectorAll('[data-cancel-bucket-action]').forEach(button=>button.addEventListener('click',()=>{editingBucketId=null;movingChildId=null;archivingBucketId=null;renderBuckets();}));
+  document.querySelectorAll('.child-bucket-form').forEach(form=>form.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const data=new FormData(form);
+    await performBucketChange(()=>createBucket(state,{parentId:form.dataset.parent,name:data.get('name'),target:data.get('target')}));
+    expandedBucketIds.add(form.dataset.parent);
+  }));
+  renderBucketDetail();
+}
+
+async function performBucketChange(change) {
+  const before=JSON.parse(JSON.stringify(state));
+  try {
+    change();
+    await persist();
+    setMessage('bucketMessage','Changes saved locally.');
+    renderBuckets(); renderOverview(); renderReview();
+  } catch(error) {
+    state=before;
+    setMessage('bucketMessage',error.message||'Could not update this bucket. No changes were saved.',true);
+    renderBuckets(); renderOverview(); renderReview();
+  }
+}
+
+function renderBucketDetail() {
+  const node=$('bucketDetail');
+  if (!selectedBucketId || !state.domain.buckets.some(item=>item.id===selectedBucketId)) { node.classList.add('hidden'); return; }
+  const detail=queryBucketDetail(state,selectedBucketId,bucketFilters);
+  const parent=detail.bucket.parentId ? state.domain.buckets.find(item=>item.id===detail.bucket.parentId) : null;
+  node.classList.remove('hidden');
+  node.innerHTML=`<div class="panel-head"><div><p class="eyebrow">BUCKET DETAIL</p><h2>${parent?`${escapeHtml(parent.name)} › `:''}${escapeHtml(detail.bucket.name)}${detail.bucket.active?'':' · Archived'}</h2><p>${detail.bucket.parentId?'Child bucket totals include only this child.':'Rolled-up totals include direct assignments and every child, including archived history.'}</p></div><button id="closeBucketDetail" aria-label="Close bucket detail">Close</button></div>
+    <div class="bucket-metrics"><div><span>Rolled-up</span><strong>${money(detail.rolledUpCents/100)}</strong></div><div><span>Direct</span><strong>${money(detail.directCents/100)}</strong></div><div><span>Transactions</span><strong>${detail.transactionCount}</strong></div></div>
+    ${detail.hasLegacyAggregate?`<p class="legacy-note">${money(detail.legacyAggregateCents/100)} exists only as a preserved V1 monthly aggregate. No transaction rows were fabricated.</p>`:''}
+    ${detail.childTotals.length?`<div class="child-totals">${detail.childTotals.map(item=>`<button data-detail="${item.bucket.id}"><span>${escapeHtml(item.bucket.name)}${item.bucket.active?'':' (archived)'}</span><strong>${money(item.amountCents/100)}</strong></button>`).join('')}</div>`:''}
+    <form id="bucketFilters" class="bucket-filters"><label>Search<input name="search" value="${escapeAttr(bucketFilters.search)}" placeholder="Merchant or transaction name"></label><label>From<input name="from" type="date" value="${escapeAttr(bucketFilters.from)}"></label><label>To<input name="to" type="date" value="${escapeAttr(bucketFilters.to)}"></label><label>Account<select name="accountId"><option value="">All accounts</option>${detail.accountOptions.map(item=>`<option value="${escapeAttr(item.id)}" ${bucketFilters.accountId===item.id?'selected':''}>${escapeHtml(item.name)}</option>`).join('')}</select></label><label>Review status<select name="reviewStatus"><option value="">Reviewed and unreviewed</option><option value="reviewed" ${bucketFilters.reviewStatus==='reviewed'?'selected':''}>Reviewed</option><option value="unreviewed" ${bucketFilters.reviewStatus==='unreviewed'?'selected':''}>Unreviewed</option></select></label><label>Assignment<select name="assignment"><option value="">Direct and child</option><option value="direct" ${bucketFilters.assignment==='direct'?'selected':''}>Direct only</option><option value="child" ${bucketFilters.assignment==='child'?'selected':''}>Child only</option></select></label><button>Apply filters</button><button type="button" id="clearBucketFilters">Clear</button></form>
+    <div class="bucket-ledger" role="region" aria-label="${escapeAttr(detail.bucket.name)} transaction ledger"><table><thead><tr><th>Date</th><th>Merchant</th><th>Amount</th><th>Account</th><th>Bucket</th><th>Status</th><th>State</th><th>Country</th><th>Source</th></tr></thead><tbody>${detail.rows.length?detail.rows.map(row=>`<tr><td>${escapeHtml(row.date||'Unknown')}</td><td>${escapeHtml(row.merchant)}</td><td>${money(row.amountCents/100)}</td><td>${escapeHtml(row.accountName)}</td><td>${escapeHtml(row.assignedBucketName)}</td><td>${escapeHtml(row.reviewStatus)}</td><td>${row.locationRegion?escapeHtml(row.locationRegion):'—'}</td><td>${row.locationCountry?escapeHtml(row.locationCountry):'—'}</td><td><small>${escapeHtml(row.source)}</small></td></tr>`).join(''):'<tr><td colspan="9">No traceable transactions match these filters.</td></tr>'}</tbody></table></div>`;
+  $('closeBucketDetail').addEventListener('click',()=>{selectedBucketId=null;renderBucketDetail();});
+  node.querySelectorAll('[data-detail]').forEach(button=>button.addEventListener('click',()=>{selectedBucketId=button.dataset.detail;renderBucketDetail();}));
+  $('bucketFilters').addEventListener('submit',event=>{event.preventDefault();bucketFilters=Object.fromEntries(new FormData(event.currentTarget));renderBucketDetail();});
+  $('clearBucketFilters').addEventListener('click',()=>{bucketFilters={from:'',to:'',accountId:'',reviewStatus:'',assignment:'',search:''};renderBucketDetail();});
 }
 
 function researchUrl(city,stateCode,kind) {
@@ -338,12 +408,10 @@ function bindEvents() {
   $('csvFile').addEventListener('change',()=>importSelectedFile($('csvFile').files[0]));
   $('addBucketForm').addEventListener('submit',async event=>{
     event.preventDefault();
-    try {
-      addBucket(state,$('newBucketName').value,$('newBucketGroup').value,$('newBucketTarget').value);
-      $('newBucketName').value='';$('newBucketTarget').value='';
-      await persist();renderAll();
-    } catch(error){alert(error.message);}
+    await performBucketChange(()=>createBucket(state,{name:$('newBucketName').value,group:$('newBucketGroup').value,target:$('newBucketTarget').value}));
+    $('newBucketName').value='';$('newBucketTarget').value='';
   });
+  $('showArchivedBuckets').addEventListener('change',renderBuckets);
   $('visitedForm').addEventListener('submit',async event=>{
     event.preventDefault();
     try {

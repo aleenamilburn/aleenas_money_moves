@@ -4,7 +4,8 @@ import {createUnknownAccount, validateDomainStore, validateBucket} from './model
 const FOUNDATION_MIGRATIONS = [
   {from:1, to:2, id:'v1-preserve-legacy-state', migrate:preserveLegacyState},
   {from:2, to:3, id:'v2-foundation-domain-store', migrate:initializeDomainStore},
-  {from:3, to:4, id:'v2-foundation-canonical-name', migrate:initializeFoundationV4}
+  {from:3, to:4, id:'v2-foundation-canonical-name', migrate:initializeFoundationV4},
+  {from:4, to:5, id:'v2a-bucket-explorer-fields', migrate:initializeBucketExplorerFields}
 ];
 
 function clone(value) {
@@ -137,7 +138,9 @@ function initializeDomainStore(state, {now}) {
       order:Number.isSafeInteger(bucket.order) ? bucket.order : domain.buckets.length,
       targetCents:toCents(bucket.target),
       protected:Boolean(bucket.protected),
-      active:true,
+      active:bucket.active !== false && !bucket.archivedAt,
+      description:typeof bucket.description === 'string' ? bucket.description : null,
+      archivedAt:bucket.archivedAt || (bucket.active === false ? timestampFor(state, now) : null),
       createdAt:timestampFor(state, now),
       updatedAt:timestampFor(state, now)
     };
@@ -154,6 +157,18 @@ function initializeDomainStore(state, {now}) {
   const balanceSnapshot = legacyBalanceSnapshot(state);
   if (balanceSnapshot && !domain.legacyBalanceSnapshots.some(item => item.id === balanceSnapshot.id)) {
     domain.legacyBalanceSnapshots.push(balanceSnapshot);
+  }
+  state.domain = domain;
+  return state;
+}
+
+function initializeBucketExplorerFields(state) {
+  const domain = asObject(state.domain);
+  domain.buckets = Array.isArray(domain.buckets) ? domain.buckets : [];
+  for (const bucket of domain.buckets) {
+    if (!Object.prototype.hasOwnProperty.call(bucket, 'description')) bucket.description = null;
+    if (!Object.prototype.hasOwnProperty.call(bucket, 'archivedAt')) bucket.archivedAt = bucket.active === false ? bucket.updatedAt : null;
+    bucket.active = bucket.archivedAt ? false : bucket.active !== false;
   }
   state.domain = domain;
   return state;

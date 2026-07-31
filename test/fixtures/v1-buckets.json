@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "app": {"name": "Aleena’s Money Moves", "version": "1.0.0"},
+  "preferences": {"monthlyIncome": 4200, "customPreference": "keep"},
+  "monthly": {"selectedMonth": "2026-07", "customMonthlyField": {"keep": true}},
+  "providerSnapshot": {"asOf": "2026-07-28"},
+  "categories": [
+    {"id": "food", "name": "Food", "group": "Needs", "target": 500, "actual": 120, "order": 2, "customCategoryField": "keep"},
+    {"id": "travel", "name": "Travel", "group": "Goals", "target": 200, "actual": 45, "order": 1},
+    {"id": "old", "name": "Old category", "group": "Wants", "target": 25, "actual": 0, "order": 3, "active": false, "archivedAt": "2026-06-30T00:00:00.000Z"}
+  ],
+  "review": {
+    "buckets": [
+      {"id": "food", "name": "Food", "group": "Needs", "target": 500, "order": 1, "protected": false},
+      {"id": "travel", "name": "Travel", "group": "Goals", "target": 200, "order": 1, "protected": false},
+      {"id": "old", "name": "Old category", "group": "Wants", "target": 25, "order": 3, "protected": false, "active": false, "archivedAt": "2026-06-30T00:00:00.000Z"}
+    ],
+    "transactions": [
+      {"id": "legacy-food-1", "date": "2026-07-20", "merchant": "Market", "amount": 12.34, "account": "Checking", "flow": "outflow", "bucketId": "food", "reviewStatus": "reviewed", "customTransactionField": "keep"},
+      {"id": "legacy-unassigned", "date": "2026-07-21", "merchant": "Mystery", "amount": 5, "account": null, "flow": "outflow", "bucketId": null, "reviewStatus": "pending"}
+    ],
+    "merchantRules": [{"id": "rule-food", "merchant": "Market", "merchantKey": "market", "bucketId": "food", "customRuleField": "keep"}],
+    "importSettings": {}
+  },
+  "travel": {"visited": [], "destinations": []},
+  "debts": [{"id": "debt-1", "name": "Keep debt"}],
+  "goals": [{"id": "goal-1", "name": "Keep goal"}],
+  "scriptures": []
+}

@@ -135,6 +135,8 @@ export function validateBucket(value) {
   requiredInteger(value.targetCents, 'targetCents', errors, {min:0});
   requiredBoolean(value.protected, 'protected', errors);
   requiredBoolean(value.active, 'active', errors);
+  optionalString(value.description, 'description', errors);
+  optionalDate(value.archivedAt, 'archivedAt', errors);
   return validationResult('Bucket', value, errors);
 }
 

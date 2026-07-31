@@ -151,15 +151,19 @@
 
       <section class="screen" id="screen-buckets">
         <div class="panel intro-panel">
-          <div><p class="eyebrow">YOUR TAXONOMY</p><h2>Rank and define your buckets</h2><p>Drag cards to change the order used in review, reports, and budget editing. Move buttons provide a keyboard-friendly alternative.</p></div>
+          <div><p class="eyebrow">BUCKET EXPLORER</p><h2>Organize spending in two levels</h2><p>Create parent buckets and optional child buckets. Archiving preserves history and stable identifiers.</p></div>
           <form id="addBucketForm" class="add-bucket-form">
-            <input id="newBucketName" placeholder="New bucket name" required>
+            <label>Name<input id="newBucketName" placeholder="New parent bucket" required></label>
+            <label>Group
             <select id="newBucketGroup"><option>Needs</option><option>Wants</option><option>Goals</option></select>
-            <input id="newBucketTarget" type="number" min="0" step="1" placeholder="Monthly target">
+            </label>
+            <label>Monthly target<input id="newBucketTarget" type="number" min="0" step="1" placeholder="0"></label>
             <button class="primary">Add bucket</button>
           </form>
         </div>
+        <div class="bucket-toolbar"><label class="toggle"><input id="showArchivedBuckets" type="checkbox"> Show archived buckets</label><p class="form-message" id="bucketMessage" role="status"></p></div>
         <div id="bucketBoard" class="bucket-board"></div>
+        <section id="bucketDetail" class="panel bucket-detail hidden" aria-live="polite"></section>
       </section>
 
       <section class="screen" id="screen-travel">

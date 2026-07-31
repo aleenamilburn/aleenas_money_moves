@@ -61,6 +61,8 @@ test('bucket depth and allocation totals are enforced', () => {
   const tree = validateBucketTree(roots);
   assert.equal(tree.ok, false);
   assert.match(tree.errors.join(' '), /third nesting level/);
+  const cycle = validateBucketTree([bucket('cycle-a', 'cycle-b'), bucket('cycle-b', 'cycle-a')]);
+  assert.equal(cycle.ok, false);
 
   const allocations = validateAllocationsForTransaction([allocation('a-1', 700), allocation('a-2', 550)], -1250);
   assert.equal(allocations.ok, true, allocations.errors.join('; '));
