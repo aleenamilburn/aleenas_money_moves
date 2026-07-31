@@ -1,0 +1,5 @@
+date,merchant_name,amount,account_name,personal_finance_category_primary,personal_finance_category_detailed,transaction_id
+2026-07-25,Neighborhood Market,62.18,Example Card,groceries,groceries,example-001
+2026-07-26,City Coffee,7.45,Example Card,dining_drinks,dining_drinks_coffee,example-002
+2026-07-27,Acme Payroll,-1175.33,Example Checking,income,income_salary,example-003
+2026-07-27,Credit Card Payment,500.00,Example Checking,transfers,transfers_credit_card_payment,example-004

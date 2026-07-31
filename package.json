@@ -1,0 +1,10 @@
+{
+  "name": "money-moves",
+  "version": "2.0.0-foundation.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check js/app.js && node --check js/state.js && node --check js/vault.js && node --check js/domain/models.js && node --check js/domain/migrations.js && node --check js/services/vaultRepository.js && node --check js/services/stateService.js"
+  }
+}
