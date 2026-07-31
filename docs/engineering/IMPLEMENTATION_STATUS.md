@@ -10,9 +10,10 @@ Last updated: 2026-07-31
 | Two-Level Sub-Buckets | IMPLEMENTED AND ACCEPTED | Exactly two levels; create, rename, reorder, move, archive/restore, rolled-up totals, validation, persistence, and browser acceptance passed. |
 | Transaction Allocations and Split Editor | IMPLEMENTED AND ACCEPTED | `V2A_TRANSACTION_ALLOCATIONS_ACCEPTANCE.md`; schema 6 migration, canonical allocation calculations, split editor, rollback, automated and browser acceptance passed. |
 | Reimbursement Design | REVIEWED | `V2A_REIMBURSEMENT_DESIGN_REVIEW.md`; all 14 product decisions approved and recorded; target entities, lifecycle, accounting, migration, service, UI workflow, validation, test, security, and acceptance contracts reviewed. No production implementation. |
+| Reimbursement Schema Foundation | IMPLEMENTED / AWAITING ACCEPTANCE | `V2A_REIMBURSEMENT_SCHEMA7_IMPLEMENTATION.md`; schema 7 entities, validation, deterministic schema-6 conversion, unresolved preservation, pure projections, and encrypted-vault tests implemented. Separate acceptance review required. |
 | Reimbursements | NEEDS IMPLEMENTATION | Foundation models only; no user workflow or screens. |
 | Account Enrichment UI | NEEDS IMPLEMENTATION | Unknown accounts remain explicit; no enrichment screen. |
 | Location Correction UI | NEEDS IMPLEMENTATION | State/country facts display when present; no correction screen. |
 | Plaid Sandbox | FUTURE / NOT IMPLEMENTED | No Plaid code, credentials, syncing, or sandbox flow. |
 
-V2A Phases 1 and 2 do not change transaction import behavior and do not delete V1 user data. The current schema version is 6. The Phase 3 reimbursement review is design-only; it does not change the schema or implementation status of reimbursements.
+V2A Phases 1 and 2 do not change transaction import behavior and do not delete V1 user data. The current schema version is 7. Phase 3A adds only the reimbursement schema foundation; reimbursements remain unimplemented at the product-workflow level.

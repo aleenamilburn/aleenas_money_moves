@@ -9,10 +9,13 @@ export const MOVEMENT_TYPES = new Set([
   'other_inflow', 'other', 'excluded'
 ]);
 export const REVIEW_STATUSES = new Set(['pending', 'suggested', 'deferred', 'reviewed', 'needs_resolution']);
-// `personal`, `shared`, and `excluded` remain readable for foundation-vault compatibility.
-// Phase 2 writes only the user-facing `mine` and `reimbursable` values.
+// `personal`, `shared`, and `excluded` remain readable for encrypted-vault compatibility.
+// Current allocation writes use only `mine` and `reimbursable`.
 export const OWNERSHIP_TYPES = new Set(['mine', 'reimbursable', 'personal', 'shared', 'excluded']);
-export const CLAIM_STATUSES = new Set(['open', 'partial', 'settled', 'overpaid', 'overdue', 'written_off', 'cancelled']);
+export const PAYMENT_LINK_SOURCES = new Set(['user_linked', 'suggestion_confirmed', 'migrated_foundation']);
+export const REIMBURSEMENT_ADJUSTMENT_TYPES = new Set(['write_off', 'write_off_reversal']);
+export const AUDIT_EVENT_SOURCES = new Set(['user', 'migration', 'reconciliation']);
+export const REIMBURSEMENT_STATUSES = new Set(['cancelled', 'open', 'partially_paid', 'settled', 'written_off']);
 
 export class ModelValidationError extends Error {
   constructor(modelName, errors) {
@@ -35,8 +38,22 @@ function optionalString(value, field, errors) {
   if (value !== undefined && value !== null && typeof value !== 'string') errors.push(`${field} must be a string or null`);
 }
 
+function optionalNonEmptyString(value, field, errors) {
+  if (value !== undefined && value !== null) requiredString(value, field, errors);
+}
+
 function optionalObject(value, field, errors) {
   if (value !== undefined && value !== null && !isPlainObject(value)) errors.push(`${field} must be an object or null`);
+}
+
+function requireField(value, field, errors) {
+  if (!Object.prototype.hasOwnProperty.call(value, field)) errors.push(`${field} is required`);
+}
+
+function rejectUnknownFields(value, allowed, modelName, errors) {
+  for (const field of Object.keys(value)) {
+    if (!allowed.has(field)) errors.push(`${modelName}.${field} is not an allowed field`);
+  }
 }
 
 function requiredBoolean(value, field, errors) {
@@ -57,18 +74,40 @@ function requiredEnum(value, field, allowed, errors) {
   if (!allowed.has(value)) errors.push(`${field} must be one of: ${[...allowed].join(', ')}`);
 }
 
+function isTimestamp(value) {
+  return typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Date.parse(value));
+}
+
 function requiredTimestamp(value, field, errors) {
   requiredString(value, field, errors);
-  if (typeof value === 'string' && Number.isNaN(Date.parse(value))) errors.push(`${field} must be an ISO-compatible timestamp`);
+  if (typeof value === 'string' && !isTimestamp(value)) errors.push(`${field} must be an ISO-compatible timestamp`);
+}
+
+function optionalTimestamp(value, field, errors) {
+  if (value !== undefined && value !== null && !isTimestamp(value)) errors.push(`${field} must be an ISO-compatible timestamp or null`);
+}
+
+function isCalendarDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
 }
 
 function optionalDate(value, field, errors) {
-  if (value === undefined || value === null) return;
-  if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) errors.push(`${field} must be an ISO-compatible date or null`);
+  if (value !== undefined && value !== null && (typeof value !== 'string' || Number.isNaN(Date.parse(value)))) errors.push(`${field} must be an ISO-compatible date or null`);
+}
+
+function optionalCalendarDate(value, field, errors) {
+  if (value !== undefined && value !== null && !isCalendarDate(value)) errors.push(`${field} must be a valid YYYY-MM-DD calendar date or null`);
 }
 
 function requiredCurrency(value, errors) {
   if (typeof value !== 'string' || !/^[A-Z]{3}$/.test(value)) errors.push('currency must be a three-letter uppercase ISO code');
+}
+
+function optionalCurrency(value, errors) {
+  if (value !== null && (typeof value !== 'string' || !/^[A-Z]{3}$/.test(value))) errors.push('currency must be a three-letter uppercase ISO code or null');
 }
 
 function validationResult(modelName, value, errors) {
@@ -84,6 +123,12 @@ function validateBaseEntity(value, modelName, errors) {
   requiredTimestamp(value.createdAt, 'createdAt', errors);
   requiredTimestamp(value.updatedAt, 'updatedAt', errors);
   return true;
+}
+
+function rejectLegacyClaimFields(value, errors) {
+  for (const field of ['expectedAmountCents', 'status', 'allocationIds', 'repaymentLinks']) {
+    if (Object.prototype.hasOwnProperty.call(value, field)) errors.push(`${field} is legacy compatibility data and is not authoritative in schema 7`);
+  }
 }
 
 export function validateAccount(value) {
@@ -112,7 +157,7 @@ export function validateTransaction(value) {
   optionalString(value.rawName, 'rawName', errors);
   optionalString(value.merchantName, 'merchantName', errors);
   requiredInteger(value.amountCents, 'amountCents', errors, {nonZero:true});
-  requiredCurrency(value.currency, errors);
+  optionalCurrency(value.currency, errors);
   optionalDate(value.authorizedAt, 'authorizedAt', errors);
   optionalDate(value.postedAt, 'postedAt', errors);
   optionalDate(value.displayDate, 'displayDate', errors);
@@ -151,6 +196,7 @@ export function validateAllocation(value) {
   requiredInteger(value.amountCents, 'amountCents', errors, {min:1});
   requiredEnum(value.ownershipType, 'ownershipType', OWNERSHIP_TYPES, errors);
   optionalString(value.note, 'note', errors);
+  // Readable only for schema-6 compatibility. Schema 7 relationships are standalone.
   optionalString(value.reimbursementClaimId, 'reimbursementClaimId', errors);
   return validationResult('Allocation', value, errors);
 }
@@ -159,28 +205,98 @@ export function validateReimbursementClaim(value) {
   const errors = [];
   if (!validateBaseEntity(value, 'ReimbursementClaim', errors)) return validationResult('ReimbursementClaim', value, errors);
   requiredString(value.payerLabel, 'payerLabel', errors);
-  requiredInteger(value.expectedAmountCents, 'expectedAmountCents', errors, {min:1});
-  requiredEnum(value.status, 'status', CLAIM_STATUSES, errors);
-  optionalDate(value.dueDate, 'dueDate', errors);
+  requiredCurrency(value.currency, errors);
+  for (const field of ['dueDate', 'note', 'cancelledAt', 'cancellationReason']) requireField(value, field, errors);
+  optionalCalendarDate(value.dueDate, 'dueDate', errors);
   optionalString(value.note, 'note', errors);
-  if (!Array.isArray(value.allocationIds)) errors.push('allocationIds must be an array');
+  optionalTimestamp(value.cancelledAt, 'cancelledAt', errors);
+  optionalNonEmptyString(value.cancellationReason, 'cancellationReason', errors);
+  const hasCancelledAt = value.cancelledAt !== undefined && value.cancelledAt !== null;
+  const hasCancellationReason = value.cancellationReason !== undefined && value.cancellationReason !== null;
+  if (hasCancelledAt !== hasCancellationReason) errors.push('cancelledAt and cancellationReason must both exist or both be null');
+  for (const field of ['payerId', 'payerEntityId', 'payerContact', 'accountId', 'country', 'location']) {
+    if (Object.prototype.hasOwnProperty.call(value, field)) errors.push(`${field} is not part of the schema-7 payer-label claim model`);
+  }
+  rejectLegacyClaimFields(value, errors);
+  return validationResult('ReimbursementClaim', value, errors);
+}
+
+export function validateReimbursementClaimAllocation(value) {
+  const errors = [];
+  if (!validateBaseEntity(value, 'ReimbursementClaimAllocation', errors)) return validationResult('ReimbursementClaimAllocation', value, errors);
+  requiredString(value.claimId, 'claimId', errors);
+  requiredString(value.allocationId, 'allocationId', errors);
+  requiredInteger(value.amountCents, 'amountCents', errors, {min:1});
+  return validationResult('ReimbursementClaimAllocation', value, errors);
+}
+
+export function validateReimbursementPaymentLink(value) {
+  const errors = [];
+  if (!validateBaseEntity(value, 'ReimbursementPaymentLink', errors)) return validationResult('ReimbursementPaymentLink', value, errors);
+  requiredString(value.claimId, 'claimId', errors);
+  requiredString(value.inflowTransactionId, 'inflowTransactionId', errors);
+  requiredInteger(value.appliedAmountCents, 'appliedAmountCents', errors, {min:1});
+  requiredEnum(value.source, 'source', PAYMENT_LINK_SOURCES, errors);
+  for (const field of ['note', 'voidedAt', 'voidReason']) requireField(value, field, errors);
+  optionalString(value.note, 'note', errors);
+  optionalTimestamp(value.voidedAt, 'voidedAt', errors);
+  optionalNonEmptyString(value.voidReason, 'voidReason', errors);
+  const hasVoidedAt = value.voidedAt !== undefined && value.voidedAt !== null;
+  const hasVoidReason = value.voidReason !== undefined && value.voidReason !== null;
+  if (hasVoidedAt !== hasVoidReason) errors.push('voidedAt and voidReason must both exist or both be null');
+  return validationResult('ReimbursementPaymentLink', value, errors);
+}
+
+export function validateReimbursementAdjustment(value) {
+  const errors = [];
+  if (!isPlainObject(value)) return validationResult('ReimbursementAdjustment', value, ['ReimbursementAdjustment must be an object']);
+  requiredString(value.id, 'id', errors);
+  requiredString(value.claimId, 'claimId', errors);
+  requiredEnum(value.type, 'type', REIMBURSEMENT_ADJUSTMENT_TYPES, errors);
+  requiredInteger(value.amountCents, 'amountCents', errors, {min:1});
+  requiredString(value.reason, 'reason', errors);
+  requiredTimestamp(value.effectiveAt, 'effectiveAt', errors);
+  requireField(value, 'reversesAdjustmentId', errors);
+  optionalNonEmptyString(value.reversesAdjustmentId, 'reversesAdjustmentId', errors);
+  requiredTimestamp(value.createdAt, 'createdAt', errors);
+  if (value.type === 'write_off' && value.reversesAdjustmentId !== null) errors.push('write_off must not reference reversesAdjustmentId');
+  if (value.type === 'write_off_reversal' && !value.reversesAdjustmentId) errors.push('write_off_reversal must reference a write_off');
+  return validationResult('ReimbursementAdjustment', value, errors);
+}
+
+export function validateAuditEvent(value) {
+  const errors = [];
+  if (!isPlainObject(value)) return validationResult('AuditEvent', value, ['AuditEvent must be an object']);
+  rejectUnknownFields(value, new Set([
+    'id', 'entityType', 'entityId', 'action', 'relatedEntityIds', 'occurredAt', 'source',
+    'reason', 'monetaryFacts', 'operationGroupId'
+  ]), 'AuditEvent', errors);
+  requiredString(value.id, 'id', errors);
+  requiredString(value.entityType, 'entityType', errors);
+  requiredString(value.entityId, 'entityId', errors);
+  requiredString(value.action, 'action', errors);
+  if (!Array.isArray(value.relatedEntityIds)) errors.push('relatedEntityIds must be an array');
   else {
-    const allocationIds = new Set();
-    value.allocationIds.forEach((id, index) => {
-      requiredString(id, `allocationIds[${index}]`, errors);
-      if (typeof id === 'string' && allocationIds.has(id)) errors.push(`allocationIds[${index}] must not duplicate another allocation id`);
-      allocationIds.add(id);
+    const related = new Set();
+    value.relatedEntityIds.forEach((id, index) => {
+      requiredString(id, `relatedEntityIds[${index}]`, errors);
+      if (typeof id === 'string' && related.has(id)) errors.push(`relatedEntityIds[${index}] must not duplicate another related entity id`);
+      related.add(id);
     });
   }
-  if (!Array.isArray(value.repaymentLinks)) errors.push('repaymentLinks must be an array');
-  else value.repaymentLinks.forEach((link, index) => {
-    if (!isPlainObject(link)) errors.push(`repaymentLinks[${index}] must be an object`);
-    else {
-      requiredString(link.transactionId, `repaymentLinks[${index}].transactionId`, errors);
-      requiredInteger(link.amountCents, `repaymentLinks[${index}].amountCents`, errors, {min:1});
+  requiredTimestamp(value.occurredAt, 'occurredAt', errors);
+  requiredEnum(value.source, 'source', AUDIT_EVENT_SOURCES, errors);
+  for (const field of ['reason', 'monetaryFacts', 'operationGroupId']) requireField(value, field, errors);
+  optionalString(value.reason, 'reason', errors);
+  if (value.monetaryFacts !== null) {
+    if (!isPlainObject(value.monetaryFacts)) errors.push('monetaryFacts must be a compact object or null');
+    else for (const [field, amount] of Object.entries(value.monetaryFacts)) {
+      if (!field.endsWith('Cents')) errors.push(`monetaryFacts.${field} must use a Cents field name`);
+      if (!Number.isSafeInteger(amount)) errors.push(`monetaryFacts.${field} must be safe integer cents`);
     }
-  });
-  return validationResult('ReimbursementClaim', value, errors);
+  }
+  optionalNonEmptyString(value.operationGroupId, 'operationGroupId', errors);
+  return validationResult('AuditEvent', value, errors);
 }
 
 export function validateMerchantRule(value) {
@@ -236,26 +352,16 @@ export function validateAllocationsForTransaction(allocations, transactionAmount
   return validationResult('AllocationSet', allocations, errors);
 }
 
-export function validateDomainStore(domain) {
-  const errors = [];
-  if (!isPlainObject(domain)) return validationResult('DomainStore', domain, ['domain must be an object']);
-  const modelCollections = [
-    ['accounts', validateAccount],
-    ['transactions', validateTransaction],
-    ['buckets', validateBucket],
-    ['allocations', validateAllocation],
-    ['reimbursementClaims', validateReimbursementClaim],
-    ['merchantRules', validateMerchantRule]
-  ];
-  for (const [field, validator] of modelCollections) {
-    if (!Array.isArray(domain[field])) {
-      errors.push(`${field} must be an array`);
-      continue;
-    }
-    for (const item of domain[field]) {
-      const result = validator(item);
-      if (!result.ok) errors.push(...result.errors.map(error => `${field}.${item?.id || 'unknown'}: ${error}`));
-    }
+function validateCollection(domain, field, validator, errors, {validateItems = true, duplicateIds = true} = {}) {
+  if (!Array.isArray(domain[field])) {
+    errors.push(`${field} must be an array`);
+    return;
+  }
+  if (validateItems) for (const item of domain[field]) {
+    const result = validator(item);
+    if (!result.ok) errors.push(...result.errors.map(error => `${field}.${item?.id || 'unknown'}: ${error}`));
+  }
+  if (duplicateIds) {
     const ids = new Set();
     for (const item of domain[field]) {
       if (typeof item?.id !== 'string' || !item.id) continue;
@@ -263,12 +369,12 @@ export function validateDomainStore(domain) {
       ids.add(item.id);
     }
   }
-  if (errors.length) return validationResult('DomainStore', domain, errors);
+}
 
+function validateBaseRelationships(domain, errors) {
   const accountIds = new Set(domain.accounts.map(account => account.id));
   const transactionIds = new Set(domain.transactions.map(transaction => transaction.id));
   const bucketIds = new Set(domain.buckets.map(bucket => bucket.id));
-  const allocationIds = new Set(domain.allocations.map(allocation => allocation.id));
   for (const transaction of domain.transactions) {
     if (!accountIds.has(transaction.accountId)) errors.push(`transaction ${transaction.id} references missing account ${transaction.accountId}`);
     const allocations = domain.allocations.filter(allocation => allocation.transactionId === transaction.id);
@@ -288,31 +394,6 @@ export function validateDomainStore(domain) {
       else if (subBucket.parentId !== allocation.bucketId) errors.push(`allocation ${allocation.id} sub-bucket ${allocation.subBucketId} must be a child of ${allocation.bucketId}`);
     }
   }
-  const claimsById = new Map(domain.reimbursementClaims.map(claim => [claim.id, claim]));
-  for (const allocation of domain.allocations) {
-    if (!allocation.reimbursementClaimId) continue;
-    const claim = claimsById.get(allocation.reimbursementClaimId);
-    if (!claim) errors.push(`allocation ${allocation.id} references missing reimbursement claim ${allocation.reimbursementClaimId}`);
-    else if (!claim.allocationIds.includes(allocation.id)) errors.push(`allocation ${allocation.id} is not listed by reimbursement claim ${claim.id}`);
-  }
-  for (const claim of domain.reimbursementClaims) {
-    for (const allocationId of claim.allocationIds) {
-      if (!allocationIds.has(allocationId)) errors.push(`claim ${claim.id} references missing allocation ${allocationId}`);
-      else {
-        const allocation = domain.allocations.find(item => item.id === allocationId);
-        if (allocation.reimbursementClaimId !== claim.id) errors.push(`claim ${claim.id} allocation ${allocationId} must reference the same claim`);
-      }
-    }
-    for (const repayment of claim.repaymentLinks) {
-      if (!transactionIds.has(repayment.transactionId)) errors.push(`claim ${claim.id} links missing repayment transaction ${repayment.transactionId}`);
-      else {
-        const transaction = domain.transactions.find(item => item.id === repayment.transactionId);
-        if (transaction.amountCents <= 0 || transaction.movementType !== 'reimbursement') {
-          errors.push(`claim ${claim.id} repayment transaction ${repayment.transactionId} must be a reimbursement inflow`);
-        }
-      }
-    }
-  }
   for (const rule of domain.merchantRules) {
     if (typeof rule.action.bucketId === 'string' && !bucketIds.has(rule.action.bucketId)) {
       errors.push(`merchant rule ${rule.id} targets missing bucket ${rule.action.bucketId}`);
@@ -320,6 +401,185 @@ export function validateDomainStore(domain) {
   }
   const tree = validateBucketTree(domain.buckets);
   if (!tree.ok) errors.push(...tree.errors);
+}
+
+function relationshipIdErrors(domain, errors) {
+  const ids = new Map();
+  for (const field of ['reimbursementClaims', 'reimbursementClaimAllocations', 'reimbursementPaymentLinks', 'reimbursementAdjustments']) {
+    for (const item of domain[field]) {
+      if (typeof item.id !== 'string' || !item.id) continue;
+      if (ids.has(item.id)) errors.push(`${field} id ${item.id} duplicates ${ids.get(item.id)} id`);
+      else ids.set(item.id, field);
+    }
+  }
+}
+
+function reimbursementAmounts(domain, claimId) {
+  const expectedAmountCents = domain.reimbursementClaimAllocations
+    .filter(link => link.claimId === claimId)
+    .reduce((sum, link) => sum + link.amountCents, 0);
+  const receivedAmountCents = domain.reimbursementPaymentLinks
+    .filter(link => link.claimId === claimId && link.voidedAt === null)
+    .reduce((sum, link) => sum + link.appliedAmountCents, 0);
+  const writeOffs = domain.reimbursementAdjustments.filter(item => item.claimId === claimId && item.type === 'write_off');
+  const reversals = domain.reimbursementAdjustments.filter(item => item.claimId === claimId && item.type === 'write_off_reversal');
+  const writtenOffAmountCents = writeOffs.reduce((sum, item) => sum + item.amountCents, 0)
+    - reversals.reduce((sum, item) => sum + item.amountCents, 0);
+  return {
+    expectedAmountCents,
+    receivedAmountCents,
+    writtenOffAmountCents,
+    remainingAmountCents:expectedAmountCents - receivedAmountCents - writtenOffAmountCents
+  };
+}
+
+function derivedStatus(claim, amounts) {
+  if (claim.cancelledAt !== null) return 'cancelled';
+  if (amounts.remainingAmountCents === 0) return amounts.writtenOffAmountCents > 0 ? 'written_off' : 'settled';
+  if (amounts.receivedAmountCents > 0) return 'partially_paid';
+  return 'open';
+}
+
+export function projectReimbursementClaim(domain, claimId, {asOf = null} = {}) {
+  const claim = domain?.reimbursementClaims?.find(item => item.id === claimId);
+  if (!claim) throw new Error(`Reimbursement claim ${claimId} does not exist.`);
+  if (asOf !== null && !isCalendarDate(asOf)) throw new Error('asOf must be a valid YYYY-MM-DD calendar date.');
+  const amounts = reimbursementAmounts(domain, claimId);
+  const status = derivedStatus(claim, amounts);
+  return {
+    claimId,
+    ...amounts,
+    status,
+    isOverdue:Boolean(asOf && claim.dueDate && claim.dueDate < asOf && amounts.remainingAmountCents > 0)
+  };
+}
+
+function validateReimbursementRelationships(domain, errors) {
+  relationshipIdErrors(domain, errors);
+  const claims = new Map(domain.reimbursementClaims.map(item => [item.id, item]));
+  const allocations = new Map(domain.allocations.map(item => [item.id, item]));
+  const transactions = new Map(domain.transactions.map(item => [item.id, item]));
+  const linksByAllocation = new Map();
+
+  for (const link of domain.reimbursementClaimAllocations) {
+    const claim = claims.get(link.claimId);
+    const allocation = allocations.get(link.allocationId);
+    if (!claim) errors.push(`claim-allocation ${link.id} references missing claim ${link.claimId}`);
+    else if (claim.cancelledAt !== null) errors.push(`claim-allocation ${link.id} cannot reference cancelled claim ${claim.id}`);
+    if (!allocation) {
+      errors.push(`claim-allocation ${link.id} references missing allocation ${link.allocationId}`);
+      continue;
+    }
+    if (allocation.ownershipType !== 'reimbursable') errors.push(`claim-allocation ${link.id} requires reimbursable allocation ${allocation.id}`);
+    if (link.amountCents > allocation.amountCents) errors.push(`claim-allocation ${link.id} amount exceeds allocation ${allocation.id}`);
+    const transaction = transactions.get(allocation.transactionId);
+    if (!transaction) continue;
+    if (transaction.amountCents >= 0 || transaction.movementType !== 'expense') errors.push(`claim-allocation ${link.id} requires an expense outflow transaction`);
+    if (claim && claim.currency !== transaction.currency) errors.push(`claim-allocation ${link.id} currency does not match claim ${claim.id}`);
+    const prior = linksByAllocation.get(allocation.id);
+    if (prior) errors.push(`allocation ${allocation.id} belongs to more than one active reimbursement claim`);
+    else linksByAllocation.set(allocation.id, link.id);
+  }
+
+  for (const claim of domain.reimbursementClaims) {
+    const claimLinks = domain.reimbursementClaimAllocations.filter(link => link.claimId === claim.id);
+    if (claim.cancelledAt === null && claimLinks.length === 0) errors.push(`active claim ${claim.id} must reference at least one claim-allocation link`);
+  }
+
+  const paymentFingerprints = new Set();
+  const activeInflowTotals = new Map();
+  for (const link of domain.reimbursementPaymentLinks) {
+    const claim = claims.get(link.claimId);
+    const transaction = transactions.get(link.inflowTransactionId);
+    if (!claim) errors.push(`payment link ${link.id} references missing claim ${link.claimId}`);
+    if (!transaction) errors.push(`payment link ${link.id} references missing inflow transaction ${link.inflowTransactionId}`);
+    else {
+      if (transaction.amountCents <= 0) errors.push(`payment link ${link.id} requires a positive inflow transaction`);
+      if (transaction.movementType !== 'reimbursement') errors.push(`payment link ${link.id} requires a reimbursement inflow`);
+      if (claim && claim.currency !== transaction.currency) errors.push(`payment link ${link.id} currency does not match claim ${claim.id}`);
+      if (link.voidedAt === null) activeInflowTotals.set(transaction.id, (activeInflowTotals.get(transaction.id) || 0) + link.appliedAmountCents);
+    }
+    const fingerprint = `${link.claimId}|${link.inflowTransactionId}|${link.appliedAmountCents}|${link.voidedAt === null ? 'active' : 'voided'}`;
+    if (paymentFingerprints.has(fingerprint)) errors.push(`payment link ${link.id} duplicates another payment relationship`);
+    paymentFingerprints.add(fingerprint);
+  }
+  for (const [transactionId, total] of activeInflowTotals) {
+    const transaction = transactions.get(transactionId);
+    if (transaction && total > transaction.amountCents) errors.push(`reimbursement inflow ${transactionId} is over-applied across claims`);
+  }
+
+  const adjustments = new Map(domain.reimbursementAdjustments.map(item => [item.id, item]));
+  const reversedWriteOffs = new Set();
+  for (const adjustment of domain.reimbursementAdjustments) {
+    const claim = claims.get(adjustment.claimId);
+    if (!claim) errors.push(`adjustment ${adjustment.id} references missing claim ${adjustment.claimId}`);
+    if (adjustment.type !== 'write_off_reversal') continue;
+    const original = adjustments.get(adjustment.reversesAdjustmentId);
+    if (!original || original.type !== 'write_off') errors.push(`adjustment ${adjustment.id} must reverse an existing write_off`);
+    else {
+      if (original.claimId !== adjustment.claimId) errors.push(`adjustment ${adjustment.id} must reverse a write_off on the same claim`);
+      if (adjustment.amountCents > original.amountCents) errors.push(`adjustment ${adjustment.id} reversal exceeds write_off ${original.id}`);
+      if (adjustment.createdAt < original.createdAt) errors.push(`adjustment ${adjustment.id} cannot reverse a write_off before it exists`);
+      if (reversedWriteOffs.has(original.id)) errors.push(`write_off ${original.id} may not be reversed more than once`);
+      reversedWriteOffs.add(original.id);
+    }
+  }
+
+  for (const claim of domain.reimbursementClaims) {
+    const amounts = reimbursementAmounts(domain, claim.id);
+    if (amounts.writtenOffAmountCents < 0) errors.push(`claim ${claim.id} has reversals exceeding write-offs`);
+    if (amounts.remainingAmountCents < 0) errors.push(`claim ${claim.id} received and written-off amounts exceed expected amount`);
+    if (claim.cancelledAt !== null) {
+      const activePayments = domain.reimbursementPaymentLinks.some(link => link.claimId === claim.id && link.voidedAt === null);
+      if (activePayments || amounts.writtenOffAmountCents !== 0) errors.push(`cancelled claim ${claim.id} cannot have active payments or write-offs`);
+    }
+    let collectible = amounts.expectedAmountCents - amounts.receivedAmountCents;
+    const ordered = domain.reimbursementAdjustments.filter(item => item.claimId === claim.id)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    const activeWriteOffAmounts = new Map();
+    for (const adjustment of ordered) {
+      if (adjustment.type === 'write_off') {
+        if (adjustment.amountCents > collectible) errors.push(`write_off ${adjustment.id} exceeds collectible remaining for claim ${claim.id}`);
+        activeWriteOffAmounts.set(adjustment.id, adjustment.amountCents);
+        collectible -= adjustment.amountCents;
+      } else {
+        const active = activeWriteOffAmounts.get(adjustment.reversesAdjustmentId);
+        if (active !== undefined) {
+          collectible += Math.min(active, adjustment.amountCents);
+          activeWriteOffAmounts.delete(adjustment.reversesAdjustmentId);
+        }
+      }
+    }
+  }
+}
+
+export function validateDomainStore(domain, {legacyReimbursements = false} = {}) {
+  const errors = [];
+  if (!isPlainObject(domain)) return validationResult('DomainStore', domain, ['domain must be an object']);
+  for (const [field, validator] of [
+    ['accounts', validateAccount],
+    ['transactions', validateTransaction],
+    ['buckets', validateBucket],
+    ['allocations', validateAllocation],
+    ['merchantRules', validateMerchantRule]
+  ]) validateCollection(domain, field, validator, errors);
+
+  if (legacyReimbursements) {
+    // Schema-6 reimbursement records are compatibility input. Their malformed relationships
+    // must reach the migration so they can be preserved with deterministic reason codes.
+    validateCollection(domain, 'reimbursementClaims', () => validationResult('LegacyReimbursementClaim', null, []), errors, {validateItems:false, duplicateIds:false});
+  } else {
+    for (const [field, validator] of [
+      ['reimbursementClaims', validateReimbursementClaim],
+      ['reimbursementClaimAllocations', validateReimbursementClaimAllocation],
+      ['reimbursementPaymentLinks', validateReimbursementPaymentLink],
+      ['reimbursementAdjustments', validateReimbursementAdjustment],
+      ['auditEvents', validateAuditEvent]
+    ]) validateCollection(domain, field, validator, errors);
+  }
+  if (errors.length) return validationResult('DomainStore', domain, errors);
+  validateBaseRelationships(domain, errors);
+  if (!legacyReimbursements) validateReimbursementRelationships(domain, errors);
   return validationResult('DomainStore', domain, errors);
 }
 

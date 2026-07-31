@@ -5,6 +5,7 @@ import {createVault, deriveKey, readVaultRecord} from '../js/vault.js';
 import {createStateService} from '../js/services/stateService.js';
 import {createVaultRepository} from '../js/services/vaultRepository.js';
 import {createLegacyV1Envelope, installBrowserGlobals, legacyV1State} from './helpers.js';
+import {schema6ReimbursementFixtures} from './fixtures/schema6-reimbursements.js';
 
 beforeEach(() => {
   installBrowserGlobals();
@@ -192,4 +193,61 @@ test('after migration, repeated unlocks use only the current V2 vault and do not
   assert.equal(repeated.sourceStorageKey, V2_VAULT_KEY);
   assert.equal(localStorage.getItem(V2_VAULT_KEY), v2Before);
   assert.equal(localStorage.getItem(V1_VAULT_KEY), legacyRaw);
+});
+
+test('an encrypted schema-6 reimbursement vault migrates to schema 7 and preserves canonical links across lock and unlock', async () => {
+  const passphrase = 'synthetic schema seven vault passphrase';
+  const legacyRecovery = await createLegacyV1Envelope(legacyV1State(), passphrase, deriveKey);
+  localStorage.setItem(V1_VAULT_KEY, legacyRecovery);
+  await createVault(schema6ReimbursementFixtures.safeRepayment(), passphrase);
+
+  const first = await service().unlock(passphrase);
+  assert.equal(first.state.schemaVersion, 7);
+  assert.equal(first.state.domain.reimbursementClaims.length, 1);
+  assert.equal(first.state.domain.reimbursementClaimAllocations.length, 1);
+  assert.equal(first.state.domain.reimbursementPaymentLinks.length, 1);
+  assert.equal(first.state.legacyFoundation.reimbursementSchema6.claims.length, 1);
+  assert.equal(localStorage.getItem(V1_VAULT_KEY), legacyRecovery);
+  assert.equal(readVaultRecord().vault.schemaVersion, 7);
+
+  const second = await service().unlock(passphrase);
+  assert.deepEqual(second.state, first.state);
+  assert.equal(second.sourceStorageKey, V2_VAULT_KEY);
+  assert.equal(localStorage.getItem(V1_VAULT_KEY), legacyRecovery);
+});
+
+test('an interrupted schema-6-to-7 vault write preserves the active schema-6 vault and succeeds on retry', async () => {
+  const passphrase = 'synthetic interrupted schema migration';
+  await createVault(schema6ReimbursementFixtures.safeSingle(), passphrase);
+  const schema6Raw = localStorage.getItem(V2_VAULT_KEY);
+  const storage = localStorage;
+  const originalSetItem = storage.setItem.bind(storage);
+  let interrupt = true;
+  storage.setItem = (key, value) => {
+    if (key === V2_VAULT_KEY && interrupt) throw new Error('synthetic schema-7 persistence interruption');
+    return originalSetItem(key, value);
+  };
+
+  await assert.rejects(() => service().unlock(passphrase), /synthetic schema-7 persistence interruption/);
+  assert.equal(localStorage.getItem(V2_VAULT_KEY), schema6Raw);
+  assert.ok(localStorage.getItem(V2_TEMP_VAULT_KEY));
+
+  interrupt = false;
+  const retried = await service().unlock(passphrase);
+  assert.equal(retried.state.schemaVersion, 7);
+  assert.equal(localStorage.getItem(V2_TEMP_VAULT_KEY), null);
+  assert.notEqual(localStorage.getItem(V2_VAULT_KEY), schema6Raw);
+});
+
+test('schema-7 validation rejects an invalid reimbursement save before the encrypted vault is overwritten', async () => {
+  const passphrase = 'synthetic invalid schema seven save';
+  await createVault(schema6ReimbursementFixtures.safeSingle(), passphrase);
+  const stateService = service();
+  const unlocked = await stateService.unlock(passphrase);
+  const before = localStorage.getItem(V2_VAULT_KEY);
+  const invalid = structuredClone(unlocked.state);
+  invalid.domain.reimbursementClaimAllocations[0].amountCents = 5000;
+
+  await assert.rejects(() => stateService.save(invalid, unlocked.key, unlocked.meta), /amount exceeds allocation/);
+  assert.equal(localStorage.getItem(V2_VAULT_KEY), before);
 });

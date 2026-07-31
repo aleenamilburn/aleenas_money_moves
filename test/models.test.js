@@ -8,8 +8,12 @@ import {
   validateBucket,
   validateBucketTree,
   validateDomainStore,
+  validateAuditEvent,
   validateMerchantRule,
+  validateReimbursementAdjustment,
+  validateReimbursementClaimAllocation,
   validateReimbursementClaim,
+  validateReimbursementPaymentLink,
   validateTransaction
 } from '../js/domain/models.js';
 
@@ -32,8 +36,12 @@ function allocation(id, amountCents) {
   return {id, transactionId:'transaction-1', bucketId:'groceries', subBucketId:null, amountCents, ownershipType:'personal', note:null, reimbursementClaimId:null, createdAt, updatedAt};
 }
 
-test('runtime validators accept each V2 foundation model', () => {
-  const claim = {id:'claim-1', payerLabel:'Roommate', expectedAmountCents:500, status:'open', dueDate:null, note:null, allocationIds:['allocation-1'], repaymentLinks:[], createdAt, updatedAt};
+test('runtime validators accept each schema-7 foundation model', () => {
+  const claim = {id:'claim-1', payerLabel:'Synthetic payer', currency:'USD', dueDate:null, note:null, cancelledAt:null, cancellationReason:null, createdAt, updatedAt};
+  const claimAllocation = {id:'claim-allocation-1', claimId:'claim-1', allocationId:'allocation-1', amountCents:500, createdAt, updatedAt};
+  const paymentLink = {id:'payment-1', claimId:'claim-1', inflowTransactionId:'transaction-2', appliedAmountCents:500, source:'user_linked', note:null, voidedAt:null, voidReason:null, createdAt, updatedAt};
+  const adjustment = {id:'adjustment-1', claimId:'claim-1', type:'write_off', amountCents:100, reason:'Synthetic reason', effectiveAt:createdAt, reversesAdjustmentId:null, createdAt};
+  const auditEvent = {id:'audit-1', entityType:'reimbursement_claim', entityId:'claim-1', action:'created', relatedEntityIds:['allocation-1'], occurredAt:createdAt, source:'user', reason:null, monetaryFacts:{expectedAmountCents:500}, operationGroupId:null};
   const rule = {id:'rule-1', merchantKey:'market', conditions:{merchantKey:'market'}, action:{bucketId:'groceries'}, active:true, lastUsedAt:null, matchCount:0, createdAt, updatedAt};
 
   for (const result of [
@@ -42,6 +50,10 @@ test('runtime validators accept each V2 foundation model', () => {
     validateBucket(bucket('groceries')),
     validateAllocation(allocation('allocation-1', 1250)),
     validateReimbursementClaim(claim),
+    validateReimbursementClaimAllocation(claimAllocation),
+    validateReimbursementPaymentLink(paymentLink),
+    validateReimbursementAdjustment(adjustment),
+    validateAuditEvent(auditEvent),
     validateMerchantRule(rule)
   ]) assert.equal(result.ok, true, result.errors.join('; '));
 });
@@ -77,7 +89,7 @@ test('domain store validation rejects broken references before persistence', () 
     transactions:[transaction()],
     buckets:[bucket('groceries')],
     allocations:[allocation('allocation-1', 1250)],
-    reimbursementClaims:[],
+    reimbursementClaims:[], reimbursementClaimAllocations:[], reimbursementPaymentLinks:[], reimbursementAdjustments:[], auditEvents:[],
     merchantRules:[]
   };
   assert.equal(validateDomainStore(domain).ok, true);
@@ -93,7 +105,7 @@ test('canonical allocations always identify a top-level parent bucket', () => {
   const domain = {
     accounts:[account()], transactions:[transaction()], buckets:[parent, child],
     allocations:[{...allocation('allocation-1', 1250), bucketId:'produce'}],
-    reimbursementClaims:[], merchantRules:[]
+    reimbursementClaims:[], reimbursementClaimAllocations:[], reimbursementPaymentLinks:[], reimbursementAdjustments:[], auditEvents:[], merchantRules:[]
   };
   const result = validateDomainStore(domain);
   assert.equal(result.ok, false);
@@ -102,17 +114,17 @@ test('canonical allocations always identify a top-level parent bucket', () => {
 
 test('domain relationships support child buckets, reimbursement allocations, and linked reimbursement inflows', () => {
   const expense = transaction();
-  const repayment = {...transaction(), id:'transaction-2', amountCents:1250, movementType:'reimbursement', merchantName:'Roommate repayment'};
+  const repayment = {...transaction(), id:'transaction-2', amountCents:1250, movementType:'reimbursement', merchantName:'Synthetic repayment'};
   const parent = bucket('travel');
   const child = bucket('lodging', 'travel');
-  const reimbursable = {...allocation('allocation-1', 1250), bucketId:'travel', subBucketId:'lodging', ownershipType:'reimbursable', reimbursementClaimId:'claim-1'};
-  const claim = {
-    id:'claim-1', payerLabel:'Roommate', expectedAmountCents:1250, status:'open', dueDate:null, note:null,
-    allocationIds:['allocation-1'], repaymentLinks:[{transactionId:'transaction-2', amountCents:1250}], createdAt, updatedAt
-  };
+  const reimbursable = {...allocation('allocation-1', 1250), bucketId:'travel', subBucketId:'lodging', ownershipType:'reimbursable', reimbursementClaimId:null};
+  const claim = {id:'claim-1', payerLabel:'Synthetic payer', currency:'USD', dueDate:null, note:null, cancelledAt:null, cancellationReason:null, createdAt, updatedAt};
   const domain = {
     accounts:[account()], transactions:[expense, repayment], buckets:[parent, child], allocations:[reimbursable],
-    reimbursementClaims:[claim], merchantRules:[{
+    reimbursementClaims:[claim],
+    reimbursementClaimAllocations:[{id:'claim-allocation-1', claimId:'claim-1', allocationId:'allocation-1', amountCents:1250, createdAt, updatedAt}],
+    reimbursementPaymentLinks:[{id:'payment-1', claimId:'claim-1', inflowTransactionId:'transaction-2', appliedAmountCents:1250, source:'user_linked', note:null, voidedAt:null, voidReason:null, createdAt, updatedAt}],
+    reimbursementAdjustments:[], auditEvents:[], merchantRules:[{
       id:'rule-1', merchantKey:'roommate', conditions:{merchantKey:'roommate'}, action:{bucketId:'travel'},
       active:true, lastUsedAt:null, matchCount:0, createdAt, updatedAt
     }]

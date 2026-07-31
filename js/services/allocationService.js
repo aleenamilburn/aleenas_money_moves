@@ -242,7 +242,8 @@ export async function saveAllocationDraft(state, transactionId, rows, persist, o
     const now = timestamp(options.now, new Date().toISOString());
     const d = domain(state);
     const existing = d.allocations.filter(item => item.transactionId === transactionId);
-    if (existing.some(item => item.reimbursementClaimId)) {
+    const canonicalClaimAllocationIds = new Set((d.reimbursementClaimAllocations || []).map(item => item.allocationId));
+    if (existing.some(item => item.reimbursementClaimId || canonicalClaimAllocationIds.has(item.id))) {
       throw new AllocationOperationError('Allocations linked to a reimbursement claim cannot be edited in this phase.', 'CLAIM_LINKED');
     }
     const transaction = ensureCanonicalTransaction(state, transactionId, now);

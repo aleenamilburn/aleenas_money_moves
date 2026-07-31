@@ -1,5 +1,5 @@
 import {PRODUCT_NAME, STATE_SCHEMA_VERSION} from './constants.js';
-import {createUnknownAccount, validateDomainStore, validateBucket} from './models.js';
+import {createUnknownAccount, validateAuditEvent, validateDomainStore, validateBucket} from './models.js';
 import {canonicalTransactionFromLegacy, deterministicAllocationId} from '../services/allocationService.js';
 
 const FOUNDATION_MIGRATIONS = [
@@ -7,7 +7,8 @@ const FOUNDATION_MIGRATIONS = [
   {from:2, to:3, id:'v2-foundation-domain-store', migrate:initializeDomainStore},
   {from:3, to:4, id:'v2-foundation-canonical-name', migrate:initializeFoundationV4},
   {from:4, to:5, id:'v2a-bucket-explorer-fields', migrate:initializeBucketExplorerFields},
-  {from:5, to:6, id:'v2a-transaction-allocations', migrate:migrateTraceableLegacyAssignments}
+  {from:5, to:6, id:'v2a-transaction-allocations', migrate:migrateTraceableLegacyAssignments},
+  {from:6, to:7, id:'v2a-reimbursement-relationship-foundation', migrate:migrateReimbursementRelationships}
 ];
 
 function clone(value) {
@@ -16,6 +17,39 @@ function clone(value) {
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function clean(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isCalendarDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
+}
+
+function isCurrency(value) {
+  return typeof value === 'string' && /^[A-Z]{3}$/.test(value);
+}
+
+function stableHash(value) {
+  let result = 2166136261;
+  const text = String(value);
+  for (let index = 0; index < text.length; index += 1) {
+    result ^= text.charCodeAt(index);
+    result = Math.imul(result, 16777619);
+  }
+  return (result >>> 0).toString(16).padStart(8, '0');
+}
+
+export function deterministicReimbursementId(kind, ...parts) {
+  return `${kind}-${stableHash(parts.join('|'))}`;
 }
 
 function sourceVersion(input) {
@@ -42,7 +76,7 @@ export function resolveMigrationTimestamp(input, providedNow) {
 function assertValidMigrationState(state, phase) {
   if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error(`${phase} state must be an object.`);
   if (state.domain !== undefined) {
-    const validation = validateDomainStore(state.domain);
+    const validation = validateDomainStore(state.domain, {legacyReimbursements:sourceVersion(state) < 7});
     if (!validation.ok) throw new Error(`${phase} state failed foundation validation: ${validation.errors.join('; ')}`);
   }
 }
@@ -129,6 +163,9 @@ function initializeDomainStore(state, {now}) {
   domain.buckets = Array.isArray(domain.buckets) ? domain.buckets : [];
   domain.allocations = Array.isArray(domain.allocations) ? domain.allocations : [];
   domain.reimbursementClaims = Array.isArray(domain.reimbursementClaims) ? domain.reimbursementClaims : [];
+  domain.reimbursementClaimAllocations = Array.isArray(domain.reimbursementClaimAllocations) ? domain.reimbursementClaimAllocations : [];
+  domain.reimbursementPaymentLinks = Array.isArray(domain.reimbursementPaymentLinks) ? domain.reimbursementPaymentLinks : [];
+  domain.reimbursementAdjustments = Array.isArray(domain.reimbursementAdjustments) ? domain.reimbursementAdjustments : [];
   domain.merchantRules = Array.isArray(domain.merchantRules) ? domain.merchantRules : [];
   domain.auditEvents = Array.isArray(domain.auditEvents) ? domain.auditEvents : [];
   domain.legacyMonthlySnapshots = Array.isArray(domain.legacyMonthlySnapshots) ? domain.legacyMonthlySnapshots : [];
@@ -280,6 +317,258 @@ function migrateTraceableLegacyAssignments(state, {now}) {
     });
     allocationIds.add(allocationId);
   }
+  return state;
+}
+
+function legacyPayerLabel(claim) {
+  for (const field of ['payerLabel', 'payerName', 'payer']) {
+    const value = clean(claim?.[field]);
+    if (value) return value;
+  }
+  return '';
+}
+
+function uniqueSorted(values) {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
+}
+
+function relevantPointerFacts(domain, claim, claimId) {
+  const listed = new Set(Array.isArray(claim?.allocationIds) ? claim.allocationIds.filter(id => typeof id === 'string') : []);
+  return domain.allocations
+    .filter(allocation => listed.has(allocation.id) || allocation.reimbursementClaimId === claimId)
+    .map(allocation => ({allocationId:allocation.id, reimbursementClaimId:allocation.reimbursementClaimId ?? null}))
+    .sort((left, right) => left.allocationId.localeCompare(right.allocationId));
+}
+
+function unresolvedReimbursementRecord(domain, claim, index, reasons, now) {
+  const claimId = clean(claim?.id) || `index-${index}`;
+  const reasonCodes = uniqueSorted(reasons.length ? reasons : ['malformed_claim']);
+  return {
+    id:deterministicReimbursementId('unresolved-reimbursement', claimId, index, reasonCodes.join(',')),
+    originalClaim:clone(claim),
+    allocationPointerFacts:relevantPointerFacts(domain, claim, clean(claim?.id)),
+    repaymentFragments:clone(Array.isArray(claim?.repaymentLinks) ? claim.repaymentLinks : []),
+    legacyStatus:typeof claim?.status === 'string' ? claim.status : null,
+    reasonCodes,
+    migratedAt:now,
+    sourceSchemaVersion:6
+  };
+}
+
+function safeLegacyAuditEvents(events) {
+  return events.filter(event => validateAuditEvent(event).ok).map(clone);
+}
+
+function migrateReimbursementRelationships(state, {now}) {
+  initializeDomainStore(state, {now});
+  const domain = state.domain;
+  const legacyClaims = clone(domain.reimbursementClaims);
+  const legacyAuditEvents = clone(domain.auditEvents);
+  const legacyPointers = domain.allocations
+    .filter(allocation => allocation.reimbursementClaimId !== undefined && allocation.reimbursementClaimId !== null)
+    .map(allocation => ({allocationId:allocation.id, reimbursementClaimId:allocation.reimbursementClaimId}))
+    .sort((left, right) => left.allocationId.localeCompare(right.allocationId));
+
+  state.legacyFoundation = asObject(state.legacyFoundation);
+  if (!isPlainObject(state.legacyFoundation.reimbursementSchema6)) {
+    state.legacyFoundation.reimbursementSchema6 = {
+      sourceSchemaVersion:6,
+      migratedAt:now,
+      claims:legacyClaims,
+      allocationPointers:legacyPointers,
+      auditEvents:legacyAuditEvents
+    };
+  }
+  const unresolved = Array.isArray(state.legacyFoundation.unresolvedReimbursementClaims)
+    ? state.legacyFoundation.unresolvedReimbursementClaims.map(clone)
+    : [];
+
+  domain.reimbursementClaims = [];
+  domain.reimbursementClaimAllocations = [];
+  domain.reimbursementPaymentLinks = [];
+  domain.reimbursementAdjustments = [];
+  domain.auditEvents = safeLegacyAuditEvents(legacyAuditEvents);
+
+  const allocations = new Map(domain.allocations.map(allocation => [allocation.id, allocation]));
+  const transactions = new Map(domain.transactions.map(transaction => [transaction.id, transaction]));
+  const claimIdCounts = new Map();
+  for (const claim of legacyClaims) {
+    const id = clean(claim?.id);
+    if (id) claimIdCounts.set(id, (claimIdCounts.get(id) || 0) + 1);
+  }
+  const orderedClaims = legacyClaims.map((claim, index) => ({claim, index}))
+    .sort((left, right) => clean(left.claim?.id).localeCompare(clean(right.claim?.id)) || left.index - right.index);
+  const usedAllocationIds = new Set();
+  const usedInflowAmounts = new Map();
+  const usedRelationshipIds = new Set();
+  let convertedClaimCount = 0;
+
+  for (const {claim, index} of orderedClaims) {
+    const reasons = [];
+    if (!isPlainObject(claim)) {
+      reasons.push('malformed_claim');
+      const record = unresolvedReimbursementRecord(domain, claim, index, reasons, now);
+      if (!unresolved.some(item => item.id === record.id)) unresolved.push(record);
+      continue;
+    }
+
+    const claimId = clean(claim.id);
+    const payerLabel = legacyPayerLabel(claim);
+    if (!claimId || claimIdCounts.get(claimId) !== 1) reasons.push(claimId ? 'duplicate_claim_id' : 'malformed_claim');
+    if (!payerLabel) reasons.push('missing_payer_label');
+    if (!Number.isSafeInteger(claim.expectedAmountCents) || claim.expectedAmountCents <= 0) reasons.push('malformed_claim');
+    if (!isTimestamp(claim.createdAt) || !isTimestamp(claim.updatedAt)) reasons.push('invalid_timestamp');
+    if (claim.dueDate !== null && claim.dueDate !== undefined && !isCalendarDate(claim.dueDate)) reasons.push('invalid_timestamp');
+    if (claim.note !== null && claim.note !== undefined && typeof claim.note !== 'string') reasons.push('malformed_claim');
+    if (!Array.isArray(claim.allocationIds) || claim.allocationIds.length === 0) reasons.push('malformed_claim');
+    if (!Array.isArray(claim.repaymentLinks)) reasons.push('malformed_claim');
+
+    const allocationIds = Array.isArray(claim.allocationIds) ? claim.allocationIds : [];
+    if (new Set(allocationIds).size !== allocationIds.length || allocationIds.some(id => !clean(id))) reasons.push('malformed_claim');
+    const pointerFacts = relevantPointerFacts(domain, claim, claimId);
+    if (pointerFacts.some(pointer => pointer.reimbursementClaimId && pointer.reimbursementClaimId !== claimId)) reasons.push('allocation_pointer_mismatch');
+    if (pointerFacts.some(pointer => pointer.reimbursementClaimId === claimId && !allocationIds.includes(pointer.allocationId))) reasons.push('allocation_pointer_mismatch');
+
+    const sourceAllocations = [];
+    const currencies = new Set();
+    for (const allocationId of allocationIds) {
+      const allocation = allocations.get(allocationId);
+      if (!allocation) {
+        reasons.push('missing_allocation');
+        continue;
+      }
+      sourceAllocations.push(allocation);
+      if (allocation.ownershipType !== 'reimbursable') reasons.push('allocation_not_reimbursable');
+      if (usedAllocationIds.has(allocation.id)) reasons.push('duplicate_allocation_claim');
+      const transaction = transactions.get(allocation.transactionId);
+      if (!transaction) {
+        reasons.push('missing_allocation_transaction');
+        continue;
+      }
+      if (transaction.amountCents >= 0 || transaction.movementType !== 'expense') reasons.push('allocation_not_expense');
+      if (!isCurrency(transaction.currency)) reasons.push('unknown_currency');
+      else currencies.add(transaction.currency);
+    }
+    if (currencies.size > 1) reasons.push('mixed_currency');
+    const claimCurrency = clean(claim.currency);
+    if (claimCurrency && !isCurrency(claimCurrency)) reasons.push('unknown_currency');
+    if (claimCurrency && currencies.size === 1 && !currencies.has(claimCurrency)) reasons.push('mixed_currency');
+    if (currencies.size === 0) reasons.push('unknown_currency');
+
+    if (sourceAllocations.length === 1 && Number.isSafeInteger(claim.expectedAmountCents)
+      && claim.expectedAmountCents > sourceAllocations[0].amountCents) reasons.push('expected_exceeds_allocation');
+    if (sourceAllocations.length > 1 && Number.isSafeInteger(claim.expectedAmountCents)) {
+      const total = sourceAllocations.reduce((sum, allocation) => sum + allocation.amountCents, 0);
+      if (total !== claim.expectedAmountCents) reasons.push('ambiguous_multi_allocation_distribution');
+    }
+
+    const repaymentFragments = Array.isArray(claim.repaymentLinks) ? claim.repaymentLinks : [];
+    const paymentLinks = [];
+    const paymentFingerprints = new Set();
+    const localInflowAmounts = new Map();
+    let receivedAmountCents = 0;
+    for (const [occurrenceIndex, repayment] of repaymentFragments.entries()) {
+      if (!isPlainObject(repayment)) {
+        reasons.push('malformed_claim');
+        continue;
+      }
+      const transactionId = clean(repayment.transactionId);
+      if (!transactionId) reasons.push('missing_repayment_transaction');
+      if (!Number.isSafeInteger(repayment.amountCents) || repayment.amountCents <= 0) reasons.push('invalid_repayment_amount');
+      const transaction = transactions.get(transactionId);
+      if (!transaction) reasons.push('missing_repayment_transaction');
+      else {
+        if (transaction.amountCents <= 0) reasons.push('invalid_repayment_direction');
+        if (transaction.movementType !== 'reimbursement') reasons.push('repayment_not_reimbursement');
+        if (!isCurrency(transaction.currency)) reasons.push('unknown_currency');
+        else if (currencies.size === 1 && !currencies.has(transaction.currency)) reasons.push('mixed_currency');
+      }
+      const fingerprint = `${transactionId}|${repayment.amountCents}`;
+      if (paymentFingerprints.has(fingerprint)) reasons.push('duplicate_repayment');
+      paymentFingerprints.add(fingerprint);
+      if (Number.isSafeInteger(repayment.amountCents) && repayment.amountCents > 0) {
+        receivedAmountCents += repayment.amountCents;
+        localInflowAmounts.set(transactionId, (localInflowAmounts.get(transactionId) || 0) + repayment.amountCents);
+      }
+      const linkId = deterministicReimbursementId('reimbursement-payment', claimId, transactionId, repayment.amountCents, occurrenceIndex);
+      if (usedRelationshipIds.has(linkId)) reasons.push('duplicate_repayment');
+      paymentLinks.push({
+        id:linkId,
+        claimId,
+        inflowTransactionId:transactionId,
+        appliedAmountCents:repayment.amountCents,
+        source:'migrated_foundation',
+        note:null,
+        voidedAt:null,
+        voidReason:null,
+        createdAt:now,
+        updatedAt:now
+      });
+    }
+    if (Number.isSafeInteger(claim.expectedAmountCents) && receivedAmountCents > claim.expectedAmountCents) reasons.push('repayment_exceeds_claim');
+    for (const [transactionId, amount] of localInflowAmounts) {
+      const transaction = transactions.get(transactionId);
+      const alreadyUsed = usedInflowAmounts.get(transactionId) || 0;
+      if (transaction && Number.isSafeInteger(transaction.amountCents) && transaction.amountCents > 0
+        && alreadyUsed + amount > transaction.amountCents) reasons.push('repayment_exceeds_inflow');
+    }
+
+    if (reasons.length) {
+      const record = unresolvedReimbursementRecord(domain, claim, index, reasons, now);
+      if (!unresolved.some(item => item.id === record.id)) unresolved.push(record);
+      continue;
+    }
+
+    const canonicalCurrency = claimCurrency || [...currencies][0];
+    const validCancellation = claim.status === 'cancelled'
+      && isTimestamp(claim.cancelledAt)
+      && clean(claim.cancellationReason)
+      && paymentLinks.length === 0;
+    const canonicalClaim = {
+      id:claimId,
+      payerLabel,
+      currency:canonicalCurrency,
+      dueDate:claim.dueDate ?? null,
+      note:claim.note ?? null,
+      cancelledAt:validCancellation ? claim.cancelledAt : null,
+      cancellationReason:validCancellation ? clean(claim.cancellationReason) : null,
+      createdAt:claim.createdAt,
+      updatedAt:claim.updatedAt
+    };
+    const claimAllocations = validCancellation ? [] : sourceAllocations.map(allocation => ({
+      id:deterministicReimbursementId('reimbursement-claim-allocation', claimId, allocation.id),
+      claimId,
+      allocationId:allocation.id,
+      amountCents:sourceAllocations.length === 1 ? claim.expectedAmountCents : allocation.amountCents,
+      createdAt:now,
+      updatedAt:now
+    }));
+    const generatedIds = [...claimAllocations.map(link => link.id), ...paymentLinks.map(link => link.id)];
+    if (generatedIds.some(id => usedRelationshipIds.has(id)) || new Set(generatedIds).size !== generatedIds.length) {
+      const record = unresolvedReimbursementRecord(domain, claim, index, ['relationship_id_collision'], now);
+      if (!unresolved.some(item => item.id === record.id)) unresolved.push(record);
+      continue;
+    }
+
+    domain.reimbursementClaims.push(canonicalClaim);
+    domain.reimbursementClaimAllocations.push(...claimAllocations);
+    domain.reimbursementPaymentLinks.push(...paymentLinks);
+    for (const id of generatedIds) usedRelationshipIds.add(id);
+    if (!validCancellation) for (const allocation of sourceAllocations) usedAllocationIds.add(allocation.id);
+    for (const [transactionId, amount] of localInflowAmounts) usedInflowAmounts.set(transactionId, (usedInflowAmounts.get(transactionId) || 0) + amount);
+    convertedClaimCount += 1;
+  }
+
+  for (const allocation of domain.allocations) allocation.reimbursementClaimId = null;
+  domain.reimbursementClaims.sort((left, right) => left.id.localeCompare(right.id));
+  domain.reimbursementClaimAllocations.sort((left, right) => left.id.localeCompare(right.id));
+  domain.reimbursementPaymentLinks.sort((left, right) => left.id.localeCompare(right.id));
+  state.legacyFoundation.unresolvedReimbursementClaims = unresolved.sort((left, right) => left.id.localeCompare(right.id));
+  const metadata = migrationMetadata(state);
+  metadata.reimbursementSchema7 = {
+    convertedClaimCount,
+    unresolvedClaimCount:state.legacyFoundation.unresolvedReimbursementClaims.length
+  };
   return state;
 }
 
