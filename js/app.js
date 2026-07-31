@@ -3,7 +3,7 @@ import {createVaultRepository} from './services/vaultRepository.js';
 import {createStateService} from './services/stateService.js';
 import {
   listBuckets, createBucket, updateBucket as updateDomainBucket, reorderBucket as reorderDomainBucket,
-  moveChildBucket, archiveBucket, restoreBucket, queryBucketDetail
+  moveChildBucket, archiveBucket, restoreBucket, queryBucketDetail, applyBucketChangeWithRollback
 } from './services/bucketService.js';
 import {
   upgradeStateWithMigration, money, monthLabel, availableMonths, availableWeeks, weekLabel,
@@ -241,14 +241,11 @@ function renderBuckets() {
 }
 
 async function performBucketChange(change) {
-  const before=JSON.parse(JSON.stringify(state));
   try {
-    change();
-    await persist();
+    await applyBucketChangeWithRollback(state,change,persist);
     setMessage('bucketMessage','Changes saved locally.');
     renderBuckets(); renderOverview(); renderReview();
   } catch(error) {
-    state=before;
     setMessage('bucketMessage',error.message||'Could not update this bucket. No changes were saved.',true);
     renderBuckets(); renderOverview(); renderReview();
   }

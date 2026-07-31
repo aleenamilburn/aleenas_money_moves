@@ -277,7 +277,9 @@ export function validateDomainStore(domain) {
   }
   for (const allocation of domain.allocations) {
     if (!transactionIds.has(allocation.transactionId)) errors.push(`allocation ${allocation.id} references missing transaction ${allocation.transactionId}`);
-    if (!bucketIds.has(allocation.bucketId)) errors.push(`allocation ${allocation.id} references missing bucket ${allocation.bucketId}`);
+    const parentBucket = domain.buckets.find(bucket => bucket.id === allocation.bucketId);
+    if (!parentBucket) errors.push(`allocation ${allocation.id} references missing bucket ${allocation.bucketId}`);
+    else if (parentBucket.parentId) errors.push(`allocation ${allocation.id} bucketId ${allocation.bucketId} must reference a top-level parent bucket`);
     if (allocation.subBucketId) {
       const subBucket = domain.buckets.find(bucket => bucket.id === allocation.subBucketId);
       if (!subBucket) errors.push(`allocation ${allocation.id} references missing sub-bucket ${allocation.subBucketId}`);

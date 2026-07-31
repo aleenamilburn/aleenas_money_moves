@@ -4,7 +4,7 @@
 
 IMPLEMENTED. The Bucket Explorer and exactly two-level sub-buckets satisfy the Phase 1 acceptance criteria. This change does not add Plaid, transaction syncing/import changes, split editing, reimbursements, autonomous categorization, charts, or a new frontend framework.
 
-The repository contains the authoritative PRD as `docs/Money_Moves_Product_Requirements_Document_v1.0.docx`; the filename named in the task, `docs/Money_Moves_PRD_v1.0.docx`, is not present.
+The authoritative PRD is `docs/Money_Moves_Product_Requirements_Document_v1.0.docx`.
 
 ## Requirements implemented
 

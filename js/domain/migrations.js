@@ -74,13 +74,22 @@ function preserveLegacyState(state, {now}) {
   state.legacyV1 = asObject(state.legacyV1);
   if (!state.legacyV1.originalSchemaVersion) state.legacyV1.originalSchemaVersion = sourceVersion(state);
   if (Array.isArray(state.categories) && !Array.isArray(state.legacyV1.categories)) state.legacyV1.categories = clone(state.categories);
+  if (Array.isArray(state.review?.buckets) && !Array.isArray(state.legacyV1.reviewBuckets)) state.legacyV1.reviewBuckets = clone(state.review.buckets);
   return state;
 }
 
 function candidateBuckets(state) {
-  if (Array.isArray(state.categories) && state.categories.length) return state.categories;
-  if (Array.isArray(state.review?.buckets)) return state.review.buckets;
-  return [];
+  const categories = Array.isArray(state.categories) ? state.categories : [];
+  const reviewBuckets = Array.isArray(state.legacyV1?.reviewBuckets)
+    ? state.legacyV1.reviewBuckets
+    : (Array.isArray(state.review?.buckets) ? state.review.buckets : []);
+  const seen = new Set();
+  return [...categories, ...reviewBuckets].filter(bucket => {
+    const id = bucket?.id;
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
 }
 
 function legacySnapshotFromCategories(state) {

@@ -105,3 +105,19 @@ test('legacy UI hydration uses the migration timestamp when no transaction can s
   assert.deepEqual(first, second);
   assert.equal(first.review.selectedWeek, '2026-07-27');
 });
+
+test('migration canonicalizes original user review buckets without canonicalizing seed-only hydration buckets', () => {
+  const v1 = legacyV1State();
+  v1.review.buckets = [{id:'custom-v1-bucket', name:'Custom V1 bucket', group:'Wants', target:45, order:9, protected:false, customBucketField:'retain'}];
+  const seeded = seed();
+  seeded.review.buckets.push({id:'seed-only-bucket', name:'Seed only', group:'Wants', target:1, system:false, order:2, protected:false});
+
+  const result = upgradeStateWithMigration(v1, seeded, {now:'2026-07-31T00:00:00.000Z'}).state;
+
+  const custom = result.domain.buckets.find(bucket => bucket.id === 'custom-v1-bucket');
+  assert.ok(custom);
+  assert.equal(custom.name, 'Custom V1 bucket');
+  assert.equal(custom.targetCents, 4500);
+  assert.equal(result.domain.buckets.some(bucket => bucket.id === 'seed-only-bucket'), false);
+  assert.equal(result.legacyV1.reviewBuckets[0].customBucketField, 'retain');
+});

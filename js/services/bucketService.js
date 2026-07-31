@@ -9,6 +9,11 @@ export class BucketOperationError extends Error {
   }
 }
 
+function restoreObject(target, snapshot) {
+  for (const key of Object.keys(target)) delete target[key];
+  Object.assign(target, snapshot);
+}
+
 const clone = value => JSON.parse(JSON.stringify(value));
 const cents = value => Math.round(Math.abs(Number(value || 0)) * 100);
 const clean = value => String(value || '').trim();
@@ -291,4 +296,20 @@ export function assertBucketStatePersistable(state) {
   const result = validateDomainStore(domain(state));
   if (!result.ok) throw new BucketOperationError(result.errors.join('; '), 'INVALID_STATE');
   return true;
+}
+
+export async function applyBucketChangeWithRollback(state, change, persist) {
+  if (typeof change !== 'function' || typeof persist !== 'function') {
+    throw new BucketOperationError('Bucket change and persistence callbacks are required.', 'INVALID_OPERATION');
+  }
+  const before = clone(state);
+  try {
+    const result = change();
+    assertBucketStatePersistable(state);
+    await persist();
+    return result;
+  } catch (error) {
+    restoreObject(state, before);
+    throw error;
+  }
 }

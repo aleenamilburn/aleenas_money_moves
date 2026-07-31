@@ -87,6 +87,19 @@ test('domain store validation rejects broken references before persistence', () 
   assert.match(result.errors.join(' '), /missing bucket/);
 });
 
+test('canonical allocations always identify a top-level parent bucket', () => {
+  const parent = bucket('groceries');
+  const child = bucket('produce', 'groceries');
+  const domain = {
+    accounts:[account()], transactions:[transaction()], buckets:[parent, child],
+    allocations:[{...allocation('allocation-1', 1250), bucketId:'produce'}],
+    reimbursementClaims:[], merchantRules:[]
+  };
+  const result = validateDomainStore(domain);
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join(' '), /top-level parent bucket/);
+});
+
 test('domain relationships support child buckets, reimbursement allocations, and linked reimbursement inflows', () => {
   const expense = transaction();
   const repayment = {...transaction(), id:'transaction-2', amountCents:1250, movementType:'reimbursement', merchantName:'Roommate repayment'};

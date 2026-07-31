@@ -11,7 +11,7 @@ The most material risks before V2A work are: a clear-text financial seed bundle,
 
 ### Authority and citation convention
 
-- The requested `docs/Money_Moves_PRD_v1.0.docx` is absent. This audit used the only PRD present: `docs/Money_Moves_Product_Requirements_Document_v1.0.docx` (41 rendered pages; document control, §1; V2A scope, §8.1; status matrix, §19). Its status statement says only V1 is implemented.
+- The authoritative PRD is `docs/Money_Moves_Product_Requirements_Document_v1.0.docx` (41 rendered pages; document control, §1; V2A scope, §8.1; status matrix, §19). Its status statement says only V1 is implemented.
 - Code citations use `path:line` or `path:start-end`. `data.js` is a single physical line, so all seed findings necessarily cite `data.js:1`.
 - **Verified** means directly observed in source or the localhost smoke test. **Inference/risk** is labelled as such. **Not implemented** means the authoritative PRD/task status prohibits treating a prototype as complete, even if related code exists.
 
@@ -321,4 +321,3 @@ No existing test or validation command was available: the repository has no pack
 | Retried `start.py --port 18888`, fetched `http://127.0.0.1:18888/index.html`, then terminated the test server | **Passed:** HTTP 200, 13,927-byte HTML response. The fetched stale title is expected from the verified branding gap (`index.html:8`), not a new failure. |
 
 The PRD was rendered to 41 PNG pages and visually inspected during this audit; no content/layout defect affected its use as the source of truth.
-
