@@ -1,5 +1,6 @@
 import {DEFAULT_CURRENCY, UNKNOWN_ACCOUNT_ID} from '../domain/constants.js';
 import {validateAllocation, validateDomainStore} from '../domain/models.js';
+import {advanceStateRevision} from './stateRevision.js';
 
 export class AllocationOperationError extends Error {
   constructor(message, code = 'ALLOCATION_OPERATION_FAILED', validation = null) {
@@ -266,6 +267,7 @@ export async function saveAllocationDraft(state, transactionId, rows, persist, o
     if (typeof options.afterReplace === 'function') options.afterReplace(state, replacements);
     const domainValidation = validateDomainStore(d);
     if (!domainValidation.ok) throw new AllocationOperationError(domainValidation.errors.join('; '), 'INVALID_STATE');
+    advanceStateRevision(state);
     await persist();
     return replacements.map(clone);
   } catch (error) {

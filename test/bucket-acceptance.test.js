@@ -184,6 +184,18 @@ test('acceptance: failed persistence rolls back canonical and compatibility stat
   assert.equal(validateFoundationDomain(unlocked.state.domain).ok, true);
 });
 
+test('acceptance: successful canonical bucket persistence advances the state revision exactly once', async () => {
+  const state = migrated();
+  let saves = 0;
+  await applyBucketChangeWithRollback(
+    state,
+    () => createBucket(state, {parentId:'food', name:'Revision child'}, {id:'revision-child', now}),
+    async () => { saves += 1; }
+  );
+  assert.equal(saves, 1);
+  assert.equal(state.stateRevision, 1);
+});
+
 test('acceptance: invalid hierarchy, identifiers, sibling names, cycles, and malformed migrated buckets fail without partial mutation', () => {
   const state = migrated();
   createBucket(state, {parentId:'food', name:'Child'}, {id:'food-child', now});

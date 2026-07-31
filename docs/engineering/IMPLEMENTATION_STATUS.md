@@ -11,9 +11,10 @@ Last updated: 2026-07-31
 | Transaction Allocations and Split Editor | IMPLEMENTED AND ACCEPTED | `V2A_TRANSACTION_ALLOCATIONS_ACCEPTANCE.md`; schema 6 migration, canonical allocation calculations, split editor, rollback, automated and browser acceptance passed. |
 | Reimbursement Design | REVIEWED | `V2A_REIMBURSEMENT_DESIGN_REVIEW.md`; all 14 product decisions approved and recorded; target entities, lifecycle, accounting, migration, service, UI workflow, validation, test, security, and acceptance contracts reviewed. No production implementation. |
 | Reimbursement Schema Foundation | IMPLEMENTED AND REVIEWED | `V2A_REIMBURSEMENT_SCHEMA7_ACCEPTANCE.md`; independent all-or-nothing migration, validation, compatibility, authority, encrypted-vault, recovery, regression, and browser acceptance passed. |
-| Reimbursements | NEEDS IMPLEMENTATION | Foundation models only; no user workflow or screens. |
+| Reimbursement Service Foundation | IMPLEMENTED / AWAITING ACCEPTANCE | `V2A_REIMBURSEMENT_SERVICE_IMPLEMENTATION.md`; revision-aware atomic claim, payment-link, write-off/reversal, cancellation, manual-repayment, projection, audit, rollback, and encrypted reload services. No product workflow or screens. |
+| Reimbursements | NEEDS IMPLEMENTATION | Schema and service foundations only; no user workflow, screens, or reporting integration. |
 | Account Enrichment UI | NEEDS IMPLEMENTATION | Unknown accounts remain explicit; no enrichment screen. |
 | Location Correction UI | NEEDS IMPLEMENTATION | State/country facts display when present; no correction screen. |
 | Plaid Sandbox | FUTURE / NOT IMPLEMENTED | No Plaid code, credentials, syncing, or sandbox flow. |
 
-V2A Phases 1 and 2 do not change transaction import behavior and do not delete V1 user data. The current schema version is 7. Phase 3A adds only the reimbursement schema foundation; reimbursements remain unimplemented at the product-workflow level.
+V2A Phases 1 and 2 do not change transaction import behavior and do not delete V1 user data. The current schema version is 7. Phase 3A adds the reviewed reimbursement schema foundation; Phase 3B adds an atomic service foundation awaiting independent acceptance. Reimbursements remain unimplemented at the product-workflow level.

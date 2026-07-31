@@ -123,6 +123,7 @@ test('saving two and three allocations keeps retained IDs, removes only allocati
     row('allocation-travel', 'travel', 534, {ownershipType:'reimbursable', note:'Expected from others'})
   ];
   await saveAllocationDraft(state, transactionId, two, async()=>{}, {now});
+  assert.equal(state.stateRevision, 1);
   assert.deepEqual(allocationTotals(state.domain.allocations.filter(item=>item.transactionId===transactionId)), {
     grossCents:1234, mineCents:700, reimbursableCents:534
   });
@@ -140,10 +141,12 @@ test('saving two and three allocations keeps retained IDs, removes only allocati
   three[0].amountCents = 600;
   three[1].amountCents = 534;
   await saveAllocationDraft(state, transactionId, three, async()=>{}, {now});
+  assert.equal(state.stateRevision, 2);
   assert.equal(state.domain.allocations.filter(item=>item.transactionId===transactionId).length, 3);
   assert.equal(state.domain.allocations.some(item=>item.id===originalId), true);
 
   await saveAllocationDraft(state, transactionId, [row(originalId, 'food', 1234)], async()=>{}, {now});
+  assert.equal(state.stateRevision, 3);
   assert.equal(state.domain.allocations.filter(item=>item.transactionId===transactionId).length, 1);
   assert.equal(state.domain.transactions.some(item=>item.id===transactionId), true);
   assert.equal(state.review.transactions.find(item=>item.id===transactionId).bucketId, 'food');

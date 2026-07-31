@@ -1,6 +1,7 @@
 import {PRODUCT_NAME, STATE_SCHEMA_VERSION} from './constants.js';
 import {createUnknownAccount, validateAuditEvent, validateDomainStore, validateBucket} from './models.js';
 import {canonicalTransactionFromLegacy, deterministicAllocationId} from '../services/allocationService.js';
+import {initializeStateRevision} from '../services/stateRevision.js';
 
 const FOUNDATION_MIGRATIONS = [
   {from:1, to:2, id:'v1-preserve-legacy-state', migrate:preserveLegacyState},
@@ -650,6 +651,9 @@ function initializeFoundationV4(state, context) {
 
 export function migrateState(input, {now} = {}) {
   const state = clone(input || {});
+  if (state.stateRevision !== undefined && (!Number.isSafeInteger(state.stateRevision) || state.stateRevision < 0)) {
+    throw new Error('Pre-migration stateRevision must be a non-negative safe integer.');
+  }
   const migrationNow = resolveMigrationTimestamp(state, now);
   const fromVersion = sourceVersion(state);
   if (fromVersion > STATE_SCHEMA_VERSION) {
@@ -671,6 +675,7 @@ export function migrateState(input, {now} = {}) {
   initializeFoundationV4(state, {now:migrationNow});
   state.schemaVersion = STATE_SCHEMA_VERSION;
   state.app = {...asObject(state.app), name:PRODUCT_NAME};
+  initializeStateRevision(state);
   assertValidMigrationState(state, 'Post-migration');
   return {state, fromVersion, toVersion:STATE_SCHEMA_VERSION, applied, changed:applied.length > 0};
 }

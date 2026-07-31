@@ -1,10 +1,12 @@
 import {migrateState, validateFoundationDomain} from '../domain/migrations.js';
+import {getStateRevision} from './stateRevision.js';
 
 function sameState(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function assertFoundationState(migration) {
+  getStateRevision(migration.state);
   const validation = validateFoundationDomain(migration.state.domain);
   if (!validation.ok) throw new Error(`Migrated state failed foundation validation: ${validation.errors.join('; ')}`);
   return migration;

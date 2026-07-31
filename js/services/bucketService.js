@@ -1,6 +1,7 @@
 import {DEFAULT_CURRENCY, UNKNOWN_ACCOUNT_ID} from '../domain/constants.js';
 import {validateBucketTree, validateDomainStore} from '../domain/models.js';
 import {canonicalAllocationRows} from './allocationService.js';
+import {advanceStateRevision} from './stateRevision.js';
 
 export class BucketOperationError extends Error {
   constructor(message, code = 'BUCKET_OPERATION_FAILED') {
@@ -287,6 +288,7 @@ export async function applyBucketChangeWithRollback(state, change, persist) {
   try {
     const result = change();
     assertBucketStatePersistable(state);
+    advanceStateRevision(state);
     await persist();
     return result;
   } catch (error) {
