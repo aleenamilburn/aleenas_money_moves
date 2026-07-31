@@ -51,6 +51,8 @@ test('bucket mutations enforce exactly two levels, sibling names, stable IDs, an
 test('one ledger path rolls child totals up, avoids double counting, and records trace sources', () => {
   const state = migrated();
   createBucket(state, {parentId:'food', name:'Groceries'}, {id:'food-groceries', now});
+  state.domain.transactions=state.domain.transactions.filter(item=>item.id!=='legacy-food-1');
+  state.domain.allocations=state.domain.allocations.filter(item=>item.transactionId!=='legacy-food-1');
   state.domain.transactions.push({id:'legacy-food-1', accountId:'unknown-account', source:'migration', sourceTransactionId:null, rawName:'Canonical market', merchantName:'Canonical market', amountCents:-1234, currency:'USD', authorizedAt:null, postedAt:'2026-07-20', displayDate:'2026-07-20', pendingStatus:'posted', movementType:'expense', reviewStatus:'reviewed', locationRegion:null, locationCountry:null, locationSource:null, providerCategory:null, manualOverrides:null, createdAt:now, updatedAt:now});
   state.domain.allocations.push({id:'allocation-1', transactionId:'legacy-food-1', bucketId:'food', subBucketId:'food-groceries', amountCents:1234, ownershipType:'personal', note:null, reimbursementClaimId:null, createdAt:now, updatedAt:now});
   state.review.transactions.push({id:'legacy-direct-2', date:'2026-07-22', merchant:'Cafe', amount:10, account:'Card', flow:'outflow', bucketId:'food', reviewStatus:'pending'});

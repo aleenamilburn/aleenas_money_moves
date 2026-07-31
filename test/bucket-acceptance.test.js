@@ -82,6 +82,8 @@ test('acceptance: V1 categories and totals migrate one-for-one without mutation 
 test('acceptance: canonical identity wins once while legacy-only, canonical-only, archived-child, and unassigned rows remain available', () => {
   const state = migrated();
   createBucket(state, {parentId:'food', name:'Child'}, {id:'food-child', now});
+  state.domain.transactions=state.domain.transactions.filter(item=>item.id!=='legacy-food-1');
+  state.domain.allocations=state.domain.allocations.filter(item=>item.transactionId!=='legacy-food-1');
   state.review.transactions.push({id:'legacy-only', date:'2026-07-23', merchant:'Legacy only', amount:5, account:'Checking', flow:'outflow', bucketId:'food', reviewStatus:'pending'});
   state.domain.transactions.push(
     canonicalTransaction('legacy-food-1', -1234, {rawName:'Canonical duplicate', merchantName:'Canonical duplicate', postedAt:'2026-07-20', displayDate:'2026-07-20'}),

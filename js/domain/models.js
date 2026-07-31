@@ -9,7 +9,9 @@ export const MOVEMENT_TYPES = new Set([
   'other_inflow', 'other', 'excluded'
 ]);
 export const REVIEW_STATUSES = new Set(['pending', 'suggested', 'deferred', 'reviewed', 'needs_resolution']);
-export const OWNERSHIP_TYPES = new Set(['personal', 'reimbursable', 'shared', 'excluded']);
+// `personal`, `shared`, and `excluded` remain readable for foundation-vault compatibility.
+// Phase 2 writes only the user-facing `mine` and `reimbursable` values.
+export const OWNERSHIP_TYPES = new Set(['mine', 'reimbursable', 'personal', 'shared', 'excluded']);
 export const CLAIM_STATUSES = new Set(['open', 'partial', 'settled', 'overpaid', 'overdue', 'written_off', 'cancelled']);
 
 export class ModelValidationError extends Error {

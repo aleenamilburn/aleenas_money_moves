@@ -6,8 +6,12 @@ import {
   moveChildBucket, archiveBucket, restoreBucket, queryBucketDetail, applyBucketChangeWithRollback
 } from './services/bucketService.js';
 import {
+  addAllocationDraftRow, createAllocationDraft, formatCurrencyCents, getTransactionContext,
+  parseCurrencyToCents, saveAllocationDraft, transactionAllocationSummary, validateAllocationDraft
+} from './services/allocationService.js';
+import {
   upgradeStateWithMigration, money, monthLabel, availableMonths, availableWeeks, weekLabel,
-  weekStats, reviewQueue, sortedBuckets, assignBucket, addTransactions,
+  weekStats, weekTransactions, reviewQueue, sortedBuckets, assignBucket, addTransactions,
   monthSummary, debtAccounts,
   rankedDestinations, addVisited, scriptureForMonth, bucketById
 } from './state.js';
@@ -34,6 +38,9 @@ let bucketFilters = {from:'',to:'',accountId:'',reviewStatus:'',assignment:'',se
 let editingBucketId = null;
 let movingChildId = null;
 let archivingBucketId = null;
+let allocationDraft = null;
+let allocationDraftDirty = false;
+let allocationEditorSource = null;
 
 function setMessage(id,message,isError=false) {
   const node=$(id);
@@ -58,6 +65,7 @@ function enterApp() {
 }
 
 function lockApp() {
+  if (allocationDraft) closeAllocationEditor();
   activeKey=null; keyMeta=null; state=null;
   clearTimeout(inactivityTimer);
   $('unlockPass').value='';
@@ -84,6 +92,7 @@ function humanCategory(value) {
 }
 
 function selectScreen(screen) {
+  if (allocationDraft && screen !== currentScreen && !discardAllocationDraft()) return;
   currentScreen=screen;
   document.querySelectorAll('.screen').forEach(node=>node.classList.toggle('active',node.id===`screen-${screen}`));
   document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.screen===screen));
@@ -168,15 +177,34 @@ function renderReview() {
     $('transactionMeta').textContent=`${tx.date} · ${tx.account} · ${humanCategory(tx.flow)}`;
     $('providerCategory').textContent=humanCategory(tx.providerCategory);
     $('providerConfidence').textContent=tx.providerConfidence?`${humanCategory(tx.providerConfidence)} provider confidence`:'No provider confidence supplied';
+    $('currentAllocationSummary').innerHTML=allocationSummaryMarkup(transactionAllocationSummary(state,tx.id));
     $('rememberRule').checked=false;
     const buckets=sortedBuckets(state,true);
     const suggested=tx.bucketId;
     $('reviewBucketChoices').innerHTML=buckets.map(bucket=>`<button class="bucket-choice ${bucket.id===suggested?'suggested':''}" data-bucket="${bucket.id}">
-      <span>${escapeHtml(bucket.name)}</span><small>${escapeHtml(bucket.group)}</small></button>`).join('');
+      <span>${escapeHtml(bucketPath(bucket.id))}</span><small>${escapeHtml(bucket.group)}</small></button>`).join('');
     document.querySelectorAll('.bucket-choice').forEach(button=>button.addEventListener('click',async()=>{
-      assignBucket(state,tx.id,button.dataset.bucket,$('rememberRule').checked);
-      await persist(); renderAll();
+      const selected=state.domain.buckets.find(item=>item.id===button.dataset.bucket);
+      if (!selected) {
+        assignBucket(state,tx.id,button.dataset.bucket,$('rememberRule').checked);
+        await persist(); renderAll();
+        return;
+      }
+      try {
+        const draft=createAllocationDraft(state,tx.id);
+        const parentId=selected.parentId||selected.id;
+        const subBucketId=selected.parentId?selected.id:null;
+        const row={...draft.rows[0],bucketId:parentId,subBucketId,amountCents:draft.magnitudeCents,ownershipType:'mine'};
+        await saveAllocationDraft(state,tx.id,[row],persist,{
+          markReviewed:true,
+          afterReplace:(nextState,allocations)=>applyRememberedRule(nextState,tx,allocations,$('rememberRule').checked)
+        });
+        renderAll();
+      } catch(error) { alert(error.message); }
     }));
+    $('editCurrentAllocation').onclick=()=>openAllocationEditor(tx.id,'review');
+  } else {
+    $('currentAllocationSummary').innerHTML='';
   }
   $('ruleCount').textContent=state.review.merchantRules.length;
   $('ruleList').innerHTML=state.review.merchantRules.length
@@ -185,6 +213,154 @@ function renderReview() {
       return `<div class="rule-item"><div><strong>${escapeHtml(rule.merchant)}</strong><small>${escapeHtml(bucket?.name||'Unknown bucket')}</small></div><span class="badge">Automatic suggestion</span></div>`;
     }).join('')
     : '<p>No merchant rules yet. Check “Always use this bucket” during review to create one.</p>';
+  renderWeekAllocationList();
+}
+
+function bucketPath(bucketId) {
+  const selected=state.domain.buckets.find(item=>item.id===bucketId);
+  if (!selected) return bucketById(state,bucketId)?.name||'Unknown bucket';
+  const parent=selected.parentId?state.domain.buckets.find(item=>item.id===selected.parentId):null;
+  return parent?`${parent.name} › ${selected.name}`:selected.name;
+}
+
+function applyRememberedRule(nextState,tx,allocations,remember) {
+  if (!remember || allocations.length!==1) return;
+  const assigned=allocations[0].subBucketId||allocations[0].bucketId;
+  let rule=nextState.review.merchantRules.find(item=>item.merchantKey===tx.merchantKey);
+  if (!rule) {
+    rule={id:crypto.randomUUID(),merchant:tx.merchant,merchantKey:tx.merchantKey,bucketId:assigned,createdAt:new Date().toISOString()};
+    nextState.review.merchantRules.push(rule);
+  } else rule.bucketId=assigned;
+}
+
+function allocationSummaryMarkup(summary,{limit=3}={}) {
+  if (!summary.lines.length) return '<p class="fine-print">Unassigned — no allocation has been saved.</p>';
+  const visible=summary.lines.slice(0,limit);
+  const rows=visible.map(line=>`<div class="allocation-summary-row"><span>${escapeHtml(line.label)}${line.archived?' · Archived':''}<small>${line.ownershipType==='reimbursable'?'Reimbursable · Not yet linked to a repayment':'Mine'}</small></span><strong>${formatCurrencyCents(line.amountCents)}</strong></div>`).join('');
+  const more=summary.lines.length>limit?`<small>+${summary.lines.length-limit} more allocation${summary.lines.length-limit===1?'':'s'}</small>`:'';
+  return `${rows}${more}`;
+}
+
+function renderWeekAllocationList() {
+  const items=weekTransactions(state);
+  $('weekAllocationList').innerHTML=items.length?items.map(tx=>{
+    const summary=transactionAllocationSummary(state,tx.id);
+    return `<div class="week-allocation-item"><div class="week-allocation-head"><div><strong>${escapeHtml(tx.merchant)}</strong><small>${escapeHtml(tx.date)} · ${summary.status==='split'?'Split allocation':summary.status==='single'?'Single allocation':'Unassigned'}${tx.reviewStatus==='reviewed'?' · Reviewed':''}</small></div><button class="allocation-edit-button" data-edit-week-allocation="${escapeAttr(tx.id)}">${summary.lines.length?'Edit allocation':'Split'}</button></div><div class="week-allocation-lines">${summary.lines.slice(0,2).map(line=>`<span><span>${escapeHtml(line.label)}${line.ownershipType==='reimbursable'?' · Reimbursable':''}</span><strong>${formatCurrencyCents(line.amountCents)}</strong></span>`).join('')}${summary.lines.length>2?`<small>+${summary.lines.length-2} more allocations</small>`:''}</div></div>`;
+  }).join(''):'<p>No transactions in this week.</p>';
+  document.querySelectorAll('[data-edit-week-allocation]').forEach(button=>button.addEventListener('click',()=>openAllocationEditor(button.dataset.editWeekAllocation,'review')));
+}
+
+function openAllocationEditor(transactionId,source) {
+  allocationDraft=createAllocationDraft(state,transactionId);
+  allocationDraftDirty=false;
+  allocationEditorSource=source;
+  $('allocationEditorLayer').classList.remove('hidden');
+  renderAllocationEditor();
+  $('allocationEditorTitle').focus?.();
+}
+
+function closeAllocationEditor() {
+  allocationDraft=null;
+  allocationDraftDirty=false;
+  allocationEditorSource=null;
+  $('allocationEditorLayer').classList.add('hidden');
+  setMessage('allocationEditorError','');
+}
+
+function discardAllocationDraft() {
+  if (!allocationDraft) return true;
+  if (allocationDraftDirty && !confirm('Discard your unsaved allocation changes?')) return false;
+  closeAllocationEditor();
+  return true;
+}
+
+function allocationParentOptions(row) {
+  return state.domain.buckets.filter(item=>!item.parentId&&(item.active||item.id===row.bucketId))
+    .sort((a,b)=>a.order-b.order||a.name.localeCompare(b.name))
+    .map(item=>`<option value="${escapeAttr(item.id)}" ${item.id===row.bucketId?'selected':''}>${escapeHtml(item.name)}${item.active?'':' (Archived)'}</option>`).join('');
+}
+
+function allocationChildOptions(row) {
+  return state.domain.buckets.filter(item=>item.parentId===row.bucketId&&(item.active||item.id===row.subBucketId))
+    .sort((a,b)=>a.order-b.order||a.name.localeCompare(b.name))
+    .map(item=>`<option value="${escapeAttr(item.id)}" ${item.id===row.subBucketId?'selected':''}>${escapeHtml(item.name)}${item.active?'':' (Archived)'}</option>`).join('');
+}
+
+function renderAllocationEditor() {
+  if (!allocationDraft) return;
+  const context=getTransactionContext(state,allocationDraft.transactionId);
+  const transaction=context.canonical||context.legacy;
+  const canonicalAccount=context.canonical?state.domain.accounts.find(item=>item.id===context.canonical.accountId):null;
+  const account=canonicalAccount?.id==='unknown-account'
+    ? (context.legacy?.account||'Unknown account')
+    : (canonicalAccount?.friendlyName||context.legacy?.account||'Unknown account');
+  const date=context.canonical?.displayDate||context.canonical?.postedAt||context.legacy?.date||'Unknown date';
+  const merchant=context.canonical?.merchantName||context.canonical?.rawName||context.legacy?.merchant||'Unknown merchant';
+  $('allocationEditorTitle').textContent=merchant;
+  $('allocationEditorMeta').textContent=`${date} · ${account}`;
+  $('allocationEditorAmount').textContent=formatCurrencyCents(context.magnitudeCents);
+  const validation=validateAllocationDraft(state,allocationDraft.transactionId,allocationDraft.rows);
+  $('allocationEditorRows').innerHTML=allocationDraft.rows.map((row,index)=>{
+    const parent=state.domain.buckets.find(item=>item.id===row.bucketId);
+    const child=row.subBucketId?state.domain.buckets.find(item=>item.id===row.subBucketId):null;
+    const archived=parent?.active===false||child?.active===false;
+    const rowError=validation.rowErrors[index]?.join(' ');
+    return `<div class="allocation-row ${archived?'archived':''}" data-allocation-row="${escapeAttr(row.id)}">
+      <label>Parent bucket<select data-allocation-field="bucketId" aria-invalid="${rowError?'true':'false'}" aria-describedby="allocationEditorError"><option value="">Choose a bucket</option>${allocationParentOptions(row)}</select></label>
+      <label>Child bucket<select data-allocation-field="subBucketId" aria-label="Optional child bucket for allocation ${index+1}"><option value="">No child bucket</option>${allocationChildOptions(row)}</select></label>
+      <label>Amount<input data-allocation-field="amount" inputmode="decimal" value="${Number.isSafeInteger(row.amountCents)?(row.amountCents/100).toFixed(2):''}" aria-invalid="${!Number.isSafeInteger(row.amountCents)||row.amountCents<=0?'true':'false'}" aria-describedby="allocationEditorError"></label>
+      <label>Ownership<select data-allocation-field="ownershipType" aria-label="Ownership for allocation ${index+1}"><option value="mine" ${row.ownershipType==='mine'?'selected':''}>Mine</option><option value="reimbursable" ${row.ownershipType==='reimbursable'?'selected':''}>Reimbursable</option></select></label>
+      <label>Note<input data-allocation-field="note" value="${escapeAttr(row.note||'')}" placeholder="Optional note"></label>
+      <button type="button" data-remove-allocation="${escapeAttr(row.id)}" aria-label="Remove allocation ${index+1}">Remove</button>
+      ${archived?'<small class="allocation-row-error">Archived assignment retained for history. Choose an active bucket to change it.</small>':rowError?`<small class="allocation-row-error">${escapeHtml(rowError)}</small>`:''}
+    </div>`;
+  }).join('');
+  refreshAllocationValidation(validation);
+
+  document.querySelectorAll('[data-allocation-row]').forEach(node=>{
+    const row=allocationDraft.rows.find(item=>item.id===node.dataset.allocationRow);
+    node.querySelectorAll('[data-allocation-field]').forEach(input=>input.addEventListener(input.dataset.allocationField==='note'||input.dataset.allocationField==='amount'?'input':'change',()=>{
+      const field=input.dataset.allocationField;
+      if (field==='amount') row.amountCents=parseCurrencyToCents(input.value);
+      else if (field==='subBucketId') row.subBucketId=input.value||null;
+      else if (field==='bucketId') { row.bucketId=input.value; row.subBucketId=null; }
+      else row[field]=input.value;
+      allocationDraftDirty=true;
+      if (field==='bucketId'||field==='subBucketId') setTimeout(renderAllocationEditor,100);
+      else if (field!=='note') refreshAllocationValidation();
+    }));
+  });
+  document.querySelectorAll('[data-remove-allocation]').forEach(button=>button.addEventListener('click',()=>{
+    allocationDraft.rows=allocationDraft.rows.filter(item=>item.id!==button.dataset.removeAllocation);
+    allocationDraftDirty=true;
+    renderAllocationEditor();
+  }));
+}
+
+function refreshAllocationValidation(existingValidation=null) {
+  if (!allocationDraft) return;
+  const validation=existingValidation||validateAllocationDraft(state,allocationDraft.transactionId,allocationDraft.rows);
+  const remainingLabel=validation.balanceCents===0?'Balanced':validation.balanceCents>0?`${formatCurrencyCents(validation.balanceCents)} remaining`:`${formatCurrencyCents(Math.abs(validation.balanceCents))} over`;
+  $('allocationEditorTotals').innerHTML=`<div><span>Original</span><strong>${formatCurrencyCents(validation.magnitudeCents)}</strong></div><div><span>Allocated</span><strong>${formatCurrencyCents(validation.grossCents)}</strong></div><div><span>Mine</span><strong>${formatCurrencyCents(validation.mineCents)}</strong></div><div><span>Reimbursable</span><strong>${formatCurrencyCents(validation.reimbursableCents)}</strong></div><div><span>Balance</span><strong>${remainingLabel}</strong></div>`;
+  setMessage('allocationEditorError',validation.errors.join(' '),!validation.ok);
+  $('saveAllocationEditor').disabled=!validation.ok;
+}
+
+async function saveOpenAllocationDraft() {
+  if (!allocationDraft) return;
+  const draft=allocationDraft;
+  const source=allocationEditorSource;
+  const legacy=state.review.transactions.find(item=>item.id===draft.transactionId);
+  try {
+    await saveAllocationDraft(state,draft.transactionId,draft.rows,persist,{
+      markReviewed:source==='review',
+      afterReplace:(nextState,allocations)=>applyRememberedRule(nextState,legacy,allocations,source==='review'&&$('rememberRule').checked)
+    });
+    closeAllocationEditor();
+    renderAll();
+  } catch(error) {
+    setMessage('allocationEditorError',error.message||'Could not save allocations. No changes were saved.',true);
+  }
 }
 
 function renderBuckets() {
@@ -262,9 +438,10 @@ function renderBucketDetail() {
     ${detail.hasLegacyAggregate?`<p class="legacy-note">${money(detail.legacyAggregateCents/100)} exists only as a preserved V1 monthly aggregate. No transaction rows were fabricated.</p>`:''}
     ${detail.childTotals.length?`<div class="child-totals">${detail.childTotals.map(item=>`<button data-detail="${item.bucket.id}"><span>${escapeHtml(item.bucket.name)}${item.bucket.active?'':' (archived)'}</span><strong>${money(item.amountCents/100)}</strong></button>`).join('')}</div>`:''}
     <form id="bucketFilters" class="bucket-filters"><label>Search<input name="search" value="${escapeAttr(bucketFilters.search)}" placeholder="Merchant or transaction name"></label><label>From<input name="from" type="date" value="${escapeAttr(bucketFilters.from)}"></label><label>To<input name="to" type="date" value="${escapeAttr(bucketFilters.to)}"></label><label>Account<select name="accountId"><option value="">All accounts</option>${detail.accountOptions.map(item=>`<option value="${escapeAttr(item.id)}" ${bucketFilters.accountId===item.id?'selected':''}>${escapeHtml(item.name)}</option>`).join('')}</select></label><label>Review status<select name="reviewStatus"><option value="">Reviewed and unreviewed</option><option value="reviewed" ${bucketFilters.reviewStatus==='reviewed'?'selected':''}>Reviewed</option><option value="unreviewed" ${bucketFilters.reviewStatus==='unreviewed'?'selected':''}>Unreviewed</option></select></label><label>Assignment<select name="assignment"><option value="">Direct and child</option><option value="direct" ${bucketFilters.assignment==='direct'?'selected':''}>Direct only</option><option value="child" ${bucketFilters.assignment==='child'?'selected':''}>Child only</option></select></label><button>Apply filters</button><button type="button" id="clearBucketFilters">Clear</button></form>
-    <div class="bucket-ledger" role="region" aria-label="${escapeAttr(detail.bucket.name)} transaction ledger"><table><thead><tr><th>Date</th><th>Merchant</th><th>Amount</th><th>Account</th><th>Bucket</th><th>Status</th><th>State</th><th>Country</th><th>Source</th></tr></thead><tbody>${detail.rows.length?detail.rows.map(row=>`<tr><td>${escapeHtml(row.date||'Unknown')}</td><td>${escapeHtml(row.merchant)}</td><td>${money(row.amountCents/100)}</td><td>${escapeHtml(row.accountName)}</td><td>${escapeHtml(row.assignedBucketName)}</td><td>${escapeHtml(row.reviewStatus)}</td><td>${row.locationRegion?escapeHtml(row.locationRegion):'—'}</td><td>${row.locationCountry?escapeHtml(row.locationCountry):'—'}</td><td><small>${escapeHtml(row.source)}</small></td></tr>`).join(''):'<tr><td colspan="9">No traceable transactions match these filters.</td></tr>'}</tbody></table></div>`;
+    <div class="bucket-ledger" role="region" aria-label="${escapeAttr(detail.bucket.name)} transaction ledger"><table><thead><tr><th>Date</th><th>Merchant</th><th>Allocation</th><th>Account</th><th>Bucket</th><th>Ownership</th><th>Status</th><th>State</th><th>Country</th><th>Source</th><th>Action</th></tr></thead><tbody>${detail.rows.length?detail.rows.map(row=>`<tr><td>${escapeHtml(row.date||'Unknown')}</td><td>${escapeHtml(row.merchant)}</td><td>${money(row.amountCents/100)}</td><td>${escapeHtml(row.accountName)}</td><td>${escapeHtml(row.assignedBucketName)}</td><td>${row.ownershipType==='reimbursable'?'Reimbursable':'Mine'}</td><td>${escapeHtml(row.reviewStatus)}</td><td>${row.locationRegion?escapeHtml(row.locationRegion):'—'}</td><td>${row.locationCountry?escapeHtml(row.locationCountry):'—'}</td><td><small>${escapeHtml(row.source)}</small></td><td><button class="allocation-edit-button" data-edit-ledger-allocation="${escapeAttr(row.transactionId)}">Edit allocation</button></td></tr>`).join(''):'<tr><td colspan="11">No traceable transactions match these filters.</td></tr>'}</tbody></table></div>`;
   $('closeBucketDetail').addEventListener('click',()=>{selectedBucketId=null;renderBucketDetail();});
   node.querySelectorAll('[data-detail]').forEach(button=>button.addEventListener('click',()=>{selectedBucketId=button.dataset.detail;renderBucketDetail();}));
+  node.querySelectorAll('[data-edit-ledger-allocation]').forEach(button=>button.addEventListener('click',()=>openAllocationEditor(button.dataset.editLedgerAllocation,'bucket')));
   $('bucketFilters').addEventListener('submit',event=>{event.preventDefault();bucketFilters=Object.fromEntries(new FormData(event.currentTarget));renderBucketDetail();});
   $('clearBucketFilters').addEventListener('click',()=>{bucketFilters={from:'',to:'',accountId:'',reviewStatus:'',assignment:'',search:''};renderBucketDetail();});
 }
@@ -399,7 +576,18 @@ function bindEvents() {
   document.querySelectorAll('.nav-item').forEach(button=>button.addEventListener('click',()=>selectScreen(button.dataset.screen)));
   $('monthSelect').addEventListener('change',async()=>{state.monthly.selectedMonth=$('monthSelect').value;await persist();renderAll();});
   $('weekSelect').addEventListener('change',async()=>{state.review.selectedWeek=$('weekSelect').value;await persist();renderReview();});
-  $('lockNow').addEventListener('click',lockApp);
+  $('lockNow').addEventListener('click',()=>{if(discardAllocationDraft())lockApp();});
+  $('addAllocationRow').addEventListener('click',()=>{addAllocationDraftRow(allocationDraft);allocationDraftDirty=true;renderAllocationEditor();});
+  $('revertSingleAllocation').addEventListener('click',()=>{
+    if (!allocationDraft) return;
+    const first=allocationDraft.rows[0]||createAllocationDraft(state,allocationDraft.transactionId).rows[0];
+    allocationDraft.rows=[{...first,amountCents:allocationDraft.magnitudeCents}];
+    allocationDraftDirty=true;renderAllocationEditor();
+  });
+  $('cancelAllocationEditor').addEventListener('click',discardAllocationDraft);
+  $('saveAllocationEditor').addEventListener('click',saveOpenAllocationDraft);
+  window.addEventListener('beforeunload',event=>{if(allocationDraftDirty){event.preventDefault();event.returnValue='';}});
+  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&allocationDraft)discardAllocationDraft();});
   $('importCsv').addEventListener('click',()=>$('csvFile').click());
   $('settingsImport').addEventListener('click',()=>$('csvFile').click());
   $('csvFile').addEventListener('change',()=>importSelectedFile($('csvFile').files[0]));

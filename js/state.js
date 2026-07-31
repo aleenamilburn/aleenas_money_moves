@@ -1,4 +1,5 @@
 import {migrateState, resolveMigrationTimestamp} from './domain/migrations.js';
+import {bucketLedgerRows} from './services/bucketService.js';
 
 const clone = value => JSON.parse(JSON.stringify(value));
 
@@ -316,12 +317,27 @@ export function transactionsForMonth(state,month=state.monthly.selectedMonth) {
 export function monthSummary(state,month=state.monthly.selectedMonth) {
   const actuals={};
   let spend=0, income=0, reviewedSpend=0, provisionalSpend=0;
+  const canonicalIds = new Set(state.domain.transactions.map(tx => tx.id));
+  const legacyById = new Map(state.review.transactions.map(tx => [tx.id,tx]));
+  for (const tx of state.domain.transactions) {
+    const date=String(tx.displayDate||tx.postedAt||tx.authorizedAt||'');
+    if (!date.startsWith(month) || tx.amountCents <= 0 || !['earned_income','gift','interest','sale_proceeds','other_inflow'].includes(tx.movementType)) continue;
+    if (tx.reviewStatus==='pending' && legacyById.get(tx.id)?.bucketId!=='income') continue;
+    income+=tx.amountCents/100;
+  }
   for (const tx of transactionsForMonth(state,month)) {
-    if (tx.flow==='inflow') { if (tx.bucketId==='income' || tx.reviewStatus!=='pending') income+=tx.amount; continue; }
-    if (tx.flow!=='outflow' || !tx.bucketId || ['transfer','income','excluded'].includes(tx.bucketId)) continue;
-    actuals[tx.bucketId]=(actuals[tx.bucketId]||0)+tx.amount;
-    spend+=tx.amount;
-    if (tx.reviewStatus==='reviewed') reviewedSpend+=tx.amount; else provisionalSpend+=tx.amount;
+    if (canonicalIds.has(tx.id) || tx.flow!=='inflow') continue;
+    if (tx.bucketId==='income' || tx.reviewStatus!=='pending') income+=tx.amount;
+  }
+  for (const row of bucketLedgerRows(state)) {
+    if (!row.date.startsWith(month) || row.movementType!=='expense' || ['transfer','income','excluded'].includes(row.assignedBucketId)) continue;
+    const amount=row.amountCents/100;
+    actuals[row.assignedBucketId]=(actuals[row.assignedBucketId]||0)+amount;
+    if (row.parentBucketId && row.parentBucketId!==row.assignedBucketId) {
+      actuals[row.parentBucketId]=(actuals[row.parentBucketId]||0)+amount;
+    }
+    spend+=amount;
+    if (row.reviewStatus==='reviewed') reviewedSpend+=amount; else provisionalSpend+=amount;
   }
   const protectedRemaining=sortedBuckets(state,false)
     .filter(bucket=>bucket.protected)

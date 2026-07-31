@@ -126,11 +126,13 @@
               <div class="transaction-amount" id="transactionAmount">$0</div>
               <h2 id="transactionMerchant">Merchant</h2>
               <p id="transactionMeta"></p>
+              <div id="currentAllocationSummary" class="allocation-summary"></div>
               <div class="provider-reference">
                 <span>Provider suggested</span><strong id="providerCategory"></strong><small id="providerConfidence"></small>
               </div>
               <label class="remember-rule"><input type="checkbox" id="rememberRule"> Always use this bucket for this merchant</label>
               <div class="bucket-choices" id="reviewBucketChoices"></div>
+              <button type="button" id="editCurrentAllocation" class="wide-button">Split or edit allocation</button>
             </div>
           </article>
           <aside class="stack">
@@ -144,6 +146,10 @@
             <article class="panel">
               <div class="panel-head"><div><p class="eyebrow">LEARNED RULES</p><h2>Merchant rules</h2></div><span class="badge" id="ruleCount">0</span></div>
               <div id="ruleList" class="rule-list"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><p class="eyebrow">THIS WEEK</p><h2>Allocation summary</h2></div></div>
+              <div id="weekAllocationList" class="week-allocation-list"></div>
             </article>
           </aside>
         </div>
@@ -247,6 +253,27 @@
         </div>
       </section>
     </main>
+  </div>
+
+  <div id="allocationEditorLayer" class="allocation-editor-layer hidden">
+    <section class="allocation-editor" role="dialog" aria-modal="true" aria-labelledby="allocationEditorTitle" aria-describedby="allocationEditorError">
+      <div class="panel-head">
+        <div><p class="eyebrow">TRANSACTION ALLOCATION</p><h2 id="allocationEditorTitle" tabindex="-1">Split transaction</h2><p id="allocationEditorMeta"></p></div>
+        <strong id="allocationEditorAmount" class="allocation-original-amount">$0.00</strong>
+      </div>
+      <div id="allocationEditorRows" class="allocation-editor-rows"></div>
+      <div class="allocation-editor-actions">
+        <button type="button" id="addAllocationRow">Add allocation</button>
+        <button type="button" id="revertSingleAllocation">Revert to one allocation</button>
+      </div>
+      <div id="allocationEditorTotals" class="allocation-totals" aria-live="polite"></div>
+      <p id="allocationEditorError" class="form-message allocation-error" role="alert"></p>
+      <p class="fine-print">Reimbursable means expected from others. It is not yet linked to a repayment.</p>
+      <div class="allocation-editor-actions end">
+        <button type="button" id="cancelAllocationEditor">Cancel</button>
+        <button type="button" id="saveAllocationEditor" class="primary">Save allocations</button>
+      </div>
+    </section>
   </div>
 
   <script src="data.js"></script>

@@ -1,5 +1,6 @@
 import {DEFAULT_CURRENCY, UNKNOWN_ACCOUNT_ID} from '../domain/constants.js';
 import {validateBucketTree, validateDomainStore} from '../domain/models.js';
+import {canonicalAllocationRows} from './allocationService.js';
 
 export class BucketOperationError extends Error {
   constructor(message, code = 'BUCKET_OPERATION_FAILED') {
@@ -196,27 +197,6 @@ function legacyAccountKey(tx) {
   return tx.accountId || (label ? `legacy-account:${label.toLocaleLowerCase()}` : UNKNOWN_ACCOUNT_ID);
 }
 
-function canonicalRows(state) {
-  const d = domain(state), txById = new Map(d.transactions.map(item => [item.id, item]));
-  const accountById = new Map(d.accounts.map(item => [item.id, item]));
-  return d.allocations.flatMap(allocation => {
-    const tx = txById.get(allocation.transactionId);
-    if (!tx) return [];
-    const account = accountById.get(tx.accountId);
-    const assignedBucketId = allocation.subBucketId || allocation.bucketId;
-    return [{
-      rowId:`allocation:${allocation.id}`, transactionId:tx.id, allocationId:allocation.id,
-      assignedBucketId, parentBucketId:allocation.bucketId, date:transactionDate(tx), merchant:transactionLabel(tx),
-      transactionName:clean(tx.rawName || tx.name || tx.merchantName) || transactionLabel(tx),
-      amountCents:allocation.amountCents, currency:tx.currency || DEFAULT_CURRENCY,
-      accountId:tx.accountId || UNKNOWN_ACCOUNT_ID, accountName:account?.friendlyName || 'Unknown account',
-      reviewStatus:tx.reviewStatus || 'unknown', assignment:allocation.subBucketId ? 'child' : 'direct',
-      locationRegion:tx.locationRegion ?? null, locationCountry:tx.locationCountry ?? null,
-      source:'canonical-allocation', trace:{transactionId:tx.id, allocationId:allocation.id}
-    }];
-  });
-}
-
 function legacyRows(state, canonicalTransactionIds) {
   const buckets = new Map(domain(state).buckets.map(item => [item.id, item]));
   return (state.review?.transactions || []).flatMap(tx => {
@@ -229,6 +209,7 @@ function legacyRows(state, canonicalTransactionIds) {
       transactionName:clean(tx.name || tx.merchant) || transactionLabel(tx),
       accountId:legacyAccountKey(tx), accountName:clean(tx.account) || 'Unknown account',
       reviewStatus:tx.reviewStatus || 'pending', assignment:assigned?.parentId ? 'child' : 'direct',
+      ownershipType:'mine', movementType:tx.flow === 'transfer' ? 'internal_transfer' : (tx.flow === 'inflow' ? 'other_inflow' : 'expense'),
       locationRegion:tx.locationRegion ?? null, locationCountry:tx.locationCountry ?? null,
       source:'legacy-v1-assignment', trace:{transactionId:tx.id, legacyField:'review.transactions[].bucketId'}
     }];
@@ -236,7 +217,7 @@ function legacyRows(state, canonicalTransactionIds) {
 }
 
 export function bucketLedgerRows(state) {
-  const canonical = canonicalRows(state);
+  const canonical = canonicalAllocationRows(state);
   const canonicalIds = new Set(canonical.map(row => row.transactionId));
   return [...canonical, ...legacyRows(state, canonicalIds)];
 }

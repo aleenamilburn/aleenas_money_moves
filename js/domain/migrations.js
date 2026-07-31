@@ -1,11 +1,13 @@
 import {PRODUCT_NAME, STATE_SCHEMA_VERSION} from './constants.js';
 import {createUnknownAccount, validateDomainStore, validateBucket} from './models.js';
+import {canonicalTransactionFromLegacy, deterministicAllocationId} from '../services/allocationService.js';
 
 const FOUNDATION_MIGRATIONS = [
   {from:1, to:2, id:'v1-preserve-legacy-state', migrate:preserveLegacyState},
   {from:2, to:3, id:'v2-foundation-domain-store', migrate:initializeDomainStore},
   {from:3, to:4, id:'v2-foundation-canonical-name', migrate:initializeFoundationV4},
-  {from:4, to:5, id:'v2a-bucket-explorer-fields', migrate:initializeBucketExplorerFields}
+  {from:4, to:5, id:'v2a-bucket-explorer-fields', migrate:initializeBucketExplorerFields},
+  {from:5, to:6, id:'v2a-transaction-allocations', migrate:migrateTraceableLegacyAssignments}
 ];
 
 function clone(value) {
@@ -180,6 +182,104 @@ function initializeBucketExplorerFields(state) {
     bucket.active = bucket.archivedAt ? false : bucket.active !== false;
   }
   state.domain = domain;
+  return state;
+}
+
+function unresolvedAllocationId(transactionId, bucketId, reason) {
+  return `unresolved-${deterministicAllocationId(transactionId || 'missing', bucketId || 'unassigned', reason)}`;
+}
+
+function recordUnresolvedAllocation(state, legacy, reason, now) {
+  state.legacyV1 = asObject(state.legacyV1);
+  state.legacyV1.unresolvedAllocationMigrations = Array.isArray(state.legacyV1.unresolvedAllocationMigrations)
+    ? state.legacyV1.unresolvedAllocationMigrations
+    : [];
+  const item = {
+    id:unresolvedAllocationId(legacy?.id, legacy?.bucketId, reason),
+    transactionId:typeof legacy?.id === 'string' ? legacy.id : null,
+    bucketId:typeof legacy?.bucketId === 'string' ? legacy.bucketId : null,
+    reason,
+    recordedAt:now
+  };
+  if (!state.legacyV1.unresolvedAllocationMigrations.some(existing => existing.id === item.id)) {
+    state.legacyV1.unresolvedAllocationMigrations.push(item);
+  }
+}
+
+function migrateTraceableLegacyAssignments(state, {now}) {
+  initializeDomainStore(state, {now});
+  const domain = state.domain;
+  for (const allocation of domain.allocations) {
+    if (allocation.ownershipType === 'personal') allocation.ownershipType = 'mine';
+  }
+  const legacyTransactions = Array.isArray(state.review?.transactions) ? state.review.transactions : [];
+  const counts = new Map();
+  for (const transaction of legacyTransactions) {
+    const id = typeof transaction?.id === 'string' ? transaction.id.trim() : '';
+    if (id) counts.set(id, (counts.get(id) || 0) + 1);
+  }
+  const buckets = new Map(domain.buckets.map(bucket => [bucket.id, bucket]));
+  const transactions = new Map(domain.transactions.map(transaction => [transaction.id, transaction]));
+  const allocationIds = new Set(domain.allocations.map(allocation => allocation.id));
+
+  for (const legacy of legacyTransactions) {
+    const transactionId = typeof legacy?.id === 'string' ? legacy.id.trim() : '';
+    if (!transactionId) {
+      if (legacy?.bucketId) recordUnresolvedAllocation(state, legacy, 'missing_transaction_id', now);
+      continue;
+    }
+    if (counts.get(transactionId) !== 1) {
+      recordUnresolvedAllocation(state, legacy, 'duplicate_transaction_id', now);
+      continue;
+    }
+    let transaction = transactions.get(transactionId);
+    const knownAccount = domain.accounts.some(account => account.id === legacy.accountId) ? legacy.accountId : undefined;
+    const migratedTransaction = canonicalTransactionFromLegacy(legacy, {now, accountId:knownAccount});
+    if (!migratedTransaction) {
+      recordUnresolvedAllocation(state, legacy, 'invalid_or_zero_transaction_amount', now);
+      continue;
+    }
+    if (transaction && Math.abs(transaction.amountCents) !== Math.abs(migratedTransaction.amountCents)) {
+      recordUnresolvedAllocation(state, legacy, 'canonical_amount_mismatch', now);
+      continue;
+    }
+    if (!transaction) {
+      transaction = migratedTransaction;
+      domain.transactions.push(transaction);
+      transactions.set(transaction.id, transaction);
+    }
+    if (!legacy.bucketId || domain.allocations.some(allocation => allocation.transactionId === transactionId)) continue;
+
+    const selected = buckets.get(legacy.bucketId);
+    if (!selected) {
+      recordUnresolvedAllocation(state, legacy, 'missing_or_system_bucket', now);
+      continue;
+    }
+    const parent = selected.parentId ? buckets.get(selected.parentId) : selected;
+    if (!parent || parent.parentId) {
+      recordUnresolvedAllocation(state, legacy, 'invalid_bucket_hierarchy', now);
+      continue;
+    }
+    const subBucketId = selected.parentId ? selected.id : null;
+    const allocationId = deterministicAllocationId(transactionId, parent.id, subBucketId);
+    if (allocationIds.has(allocationId)) {
+      recordUnresolvedAllocation(state, legacy, 'allocation_id_collision', now);
+      continue;
+    }
+    domain.allocations.push({
+      id:allocationId,
+      transactionId,
+      bucketId:parent.id,
+      subBucketId,
+      amountCents:Math.abs(transaction.amountCents),
+      ownershipType:'mine',
+      note:null,
+      reimbursementClaimId:null,
+      createdAt:now,
+      updatedAt:now
+    });
+    allocationIds.add(allocationId);
+  }
   return state;
 }
 
