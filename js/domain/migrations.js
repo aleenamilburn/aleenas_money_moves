@@ -48,6 +48,23 @@ function stableHash(value) {
   return (result >>> 0).toString(16).padStart(8, '0');
 }
 
+function stableSerialize(value) {
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value).sort((left, right) => left.localeCompare(right))
+      .map(key => `${JSON.stringify(key)}:${stableSerialize(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function semanticClaimKey(claim) {
+  if (!isPlainObject(claim)) return stableSerialize(claim);
+  const normalized = clone(claim);
+  if (Array.isArray(normalized.allocationIds)) normalized.allocationIds.sort((left, right) => stableSerialize(left).localeCompare(stableSerialize(right)));
+  if (Array.isArray(normalized.repaymentLinks)) normalized.repaymentLinks.sort((left, right) => stableSerialize(left).localeCompare(stableSerialize(right)));
+  return stableSerialize(normalized);
+}
+
 export function deterministicReimbursementId(kind, ...parts) {
   return `${kind}-${stableHash(parts.join('|'))}`;
 }
@@ -340,11 +357,14 @@ function relevantPointerFacts(domain, claim, claimId) {
     .sort((left, right) => left.allocationId.localeCompare(right.allocationId));
 }
 
-function unresolvedReimbursementRecord(domain, claim, index, reasons, now) {
-  const claimId = clean(claim?.id) || `index-${index}`;
+function unresolvedReimbursementRecord(domain, claim, identity, reasons, now) {
+  const claimFingerprint = stableHash(identity.semanticKey);
+  const claimId = clean(claim?.id) || `fingerprint-${claimFingerprint}`;
   const reasonCodes = uniqueSorted(reasons.length ? reasons : ['malformed_claim']);
   return {
-    id:deterministicReimbursementId('unresolved-reimbursement', claimId, index, reasonCodes.join(',')),
+    id:deterministicReimbursementId(
+      'unresolved-reimbursement', claimId, claimFingerprint, identity.occurrenceIndex, reasonCodes.join(',')
+    ),
     originalClaim:clone(claim),
     allocationPointerFacts:relevantPointerFacts(domain, claim, clean(claim?.id)),
     repaymentFragments:clone(Array.isArray(claim?.repaymentLinks) ? claim.repaymentLinks : []),
@@ -355,30 +375,52 @@ function unresolvedReimbursementRecord(domain, claim, index, reasons, now) {
   };
 }
 
-function safeLegacyAuditEvents(events) {
-  return events.filter(event => validateAuditEvent(event).ok).map(clone);
+function safeLegacyAuditEvents(events, unresolvedRecords = []) {
+  const unresolvedEntityIds = new Set();
+  for (const record of unresolvedRecords) {
+    const claimId = clean(record.originalClaim?.id);
+    if (claimId) unresolvedEntityIds.add(claimId);
+    for (const pointer of record.allocationPointerFacts || []) unresolvedEntityIds.add(pointer.allocationId);
+    for (const repayment of record.repaymentFragments || []) {
+      const transactionId = clean(repayment?.transactionId);
+      if (transactionId) unresolvedEntityIds.add(transactionId);
+    }
+  }
+  return events.filter(event => {
+    if (!validateAuditEvent(event).ok) return false;
+    if (event.source !== 'migration') return true;
+    return ![event.entityId, ...(event.relatedEntityIds || [])].some(id => unresolvedEntityIds.has(id));
+  }).map(clone);
 }
 
 function migrateReimbursementRelationships(state, {now}) {
+  const sourceAuditEvidence = clone(state.domain?.auditEvents);
   initializeDomainStore(state, {now});
   const domain = state.domain;
   const legacyClaims = clone(domain.reimbursementClaims);
-  const legacyAuditEvents = clone(domain.auditEvents);
+  const legacyAuditEvents = Array.isArray(sourceAuditEvidence) ? sourceAuditEvidence : [];
+  const legacyTransactionCurrencyFacts = domain.transactions.map(transaction => ({
+    transactionId:transaction.id,
+    currencyFieldPresent:Object.prototype.hasOwnProperty.call(transaction, 'currency'),
+    currency:clone(transaction.currency)
+  })).sort((left, right) => left.transactionId.localeCompare(right.transactionId));
   const legacyPointers = domain.allocations
     .filter(allocation => allocation.reimbursementClaimId !== undefined && allocation.reimbursementClaimId !== null)
     .map(allocation => ({allocationId:allocation.id, reimbursementClaimId:allocation.reimbursementClaimId}))
     .sort((left, right) => left.allocationId.localeCompare(right.allocationId));
 
   state.legacyFoundation = asObject(state.legacyFoundation);
-  if (!isPlainObject(state.legacyFoundation.reimbursementSchema6)) {
-    state.legacyFoundation.reimbursementSchema6 = {
-      sourceSchemaVersion:6,
-      migratedAt:now,
-      claims:legacyClaims,
-      allocationPointers:legacyPointers,
-      auditEvents:legacyAuditEvents
-    };
+  if (isPlainObject(state.legacyFoundation.reimbursementSchema6)) {
+    state.legacyFoundation.preexistingReimbursementSchema6 = clone(state.legacyFoundation.reimbursementSchema6);
   }
+  state.legacyFoundation.reimbursementSchema6 = {
+    sourceSchemaVersion:6,
+    migratedAt:now,
+    claims:legacyClaims,
+    allocationPointers:legacyPointers,
+    transactionCurrencyFacts:legacyTransactionCurrencyFacts,
+    auditEvents:sourceAuditEvidence === undefined ? [] : sourceAuditEvidence
+  };
   const unresolved = Array.isArray(state.legacyFoundation.unresolvedReimbursementClaims)
     ? state.legacyFoundation.unresolvedReimbursementClaims.map(clone)
     : [];
@@ -387,7 +429,11 @@ function migrateReimbursementRelationships(state, {now}) {
   domain.reimbursementClaimAllocations = [];
   domain.reimbursementPaymentLinks = [];
   domain.reimbursementAdjustments = [];
-  domain.auditEvents = safeLegacyAuditEvents(legacyAuditEvents);
+  domain.auditEvents = [];
+
+  for (const transaction of domain.transactions) {
+    if (!isCurrency(transaction.currency)) transaction.currency = null;
+  }
 
   const allocations = new Map(domain.allocations.map(allocation => [allocation.id, allocation]));
   const transactions = new Map(domain.transactions.map(transaction => [transaction.id, transaction]));
@@ -396,18 +442,29 @@ function migrateReimbursementRelationships(state, {now}) {
     const id = clean(claim?.id);
     if (id) claimIdCounts.set(id, (claimIdCounts.get(id) || 0) + 1);
   }
-  const orderedClaims = legacyClaims.map((claim, index) => ({claim, index}))
-    .sort((left, right) => clean(left.claim?.id).localeCompare(clean(right.claim?.id)) || left.index - right.index);
+  const orderedClaims = legacyClaims.map((claim, index) => ({claim, index, semanticKey:semanticClaimKey(claim)}))
+    .sort((left, right) => clean(left.claim?.id).localeCompare(clean(right.claim?.id))
+      || left.semanticKey.localeCompare(right.semanticKey)
+      || left.index - right.index);
+  const claimOccurrences = new Map();
+  for (const item of orderedClaims) {
+    const key = `${clean(item.claim?.id)}|${item.semanticKey}`;
+    item.occurrenceIndex = claimOccurrences.get(key) || 0;
+    claimOccurrences.set(key, item.occurrenceIndex + 1);
+  }
   const usedAllocationIds = new Set();
   const usedInflowAmounts = new Map();
-  const usedRelationshipIds = new Set();
+  // Canonical claim IDs share the reimbursement relationship namespace. Reserve every
+  // source claim ID so a generated link collision fails the affected claim safely.
+  const usedRelationshipIds = new Set(claimIdCounts.keys());
   let convertedClaimCount = 0;
 
-  for (const {claim, index} of orderedClaims) {
+  for (const {claim, index, semanticKey, occurrenceIndex} of orderedClaims) {
+    const identity = {semanticKey, occurrenceIndex};
     const reasons = [];
     if (!isPlainObject(claim)) {
       reasons.push('malformed_claim');
-      const record = unresolvedReimbursementRecord(domain, claim, index, reasons, now);
+      const record = unresolvedReimbursementRecord(domain, claim, identity, reasons, now);
       if (!unresolved.some(item => item.id === record.id)) unresolved.push(record);
       continue;
     }
@@ -426,7 +483,7 @@ function migrateReimbursementRelationships(state, {now}) {
     const allocationIds = Array.isArray(claim.allocationIds) ? claim.allocationIds : [];
     if (new Set(allocationIds).size !== allocationIds.length || allocationIds.some(id => !clean(id))) reasons.push('malformed_claim');
     const pointerFacts = relevantPointerFacts(domain, claim, claimId);
-    if (pointerFacts.some(pointer => pointer.reimbursementClaimId && pointer.reimbursementClaimId !== claimId)) reasons.push('allocation_pointer_mismatch');
+    if (pointerFacts.some(pointer => allocationIds.includes(pointer.allocationId) && pointer.reimbursementClaimId !== claimId)) reasons.push('allocation_pointer_mismatch');
     if (pointerFacts.some(pointer => pointer.reimbursementClaimId === claimId && !allocationIds.includes(pointer.allocationId))) reasons.push('allocation_pointer_mismatch');
 
     const sourceAllocations = [];
@@ -467,7 +524,15 @@ function migrateReimbursementRelationships(state, {now}) {
     const paymentFingerprints = new Set();
     const localInflowAmounts = new Map();
     let receivedAmountCents = 0;
-    for (const [occurrenceIndex, repayment] of repaymentFragments.entries()) {
+    const orderedRepayments = repaymentFragments.map((repayment, sourceIndex) => ({
+      repayment, sourceIndex, semanticKey:stableSerialize(repayment)
+    })).sort((left, right) => left.semanticKey.localeCompare(right.semanticKey) || left.sourceIndex - right.sourceIndex);
+    const repaymentOccurrences = new Map();
+    for (const item of orderedRepayments) {
+      item.occurrenceIndex = repaymentOccurrences.get(item.semanticKey) || 0;
+      repaymentOccurrences.set(item.semanticKey, item.occurrenceIndex + 1);
+    }
+    for (const {repayment, occurrenceIndex:repaymentOccurrenceIndex} of orderedRepayments) {
       if (!isPlainObject(repayment)) {
         reasons.push('malformed_claim');
         continue;
@@ -490,7 +555,9 @@ function migrateReimbursementRelationships(state, {now}) {
         receivedAmountCents += repayment.amountCents;
         localInflowAmounts.set(transactionId, (localInflowAmounts.get(transactionId) || 0) + repayment.amountCents);
       }
-      const linkId = deterministicReimbursementId('reimbursement-payment', claimId, transactionId, repayment.amountCents, occurrenceIndex);
+      const linkId = deterministicReimbursementId(
+        'reimbursement-payment', claimId, transactionId, repayment.amountCents, repaymentOccurrenceIndex
+      );
       if (usedRelationshipIds.has(linkId)) reasons.push('duplicate_repayment');
       paymentLinks.push({
         id:linkId,
@@ -514,7 +581,7 @@ function migrateReimbursementRelationships(state, {now}) {
     }
 
     if (reasons.length) {
-      const record = unresolvedReimbursementRecord(domain, claim, index, reasons, now);
+      const record = unresolvedReimbursementRecord(domain, claim, identity, reasons, now);
       if (!unresolved.some(item => item.id === record.id)) unresolved.push(record);
       continue;
     }
@@ -545,7 +612,7 @@ function migrateReimbursementRelationships(state, {now}) {
     }));
     const generatedIds = [...claimAllocations.map(link => link.id), ...paymentLinks.map(link => link.id)];
     if (generatedIds.some(id => usedRelationshipIds.has(id)) || new Set(generatedIds).size !== generatedIds.length) {
-      const record = unresolvedReimbursementRecord(domain, claim, index, ['relationship_id_collision'], now);
+      const record = unresolvedReimbursementRecord(domain, claim, identity, ['relationship_id_collision'], now);
       if (!unresolved.some(item => item.id === record.id)) unresolved.push(record);
       continue;
     }
@@ -564,6 +631,7 @@ function migrateReimbursementRelationships(state, {now}) {
   domain.reimbursementClaimAllocations.sort((left, right) => left.id.localeCompare(right.id));
   domain.reimbursementPaymentLinks.sort((left, right) => left.id.localeCompare(right.id));
   state.legacyFoundation.unresolvedReimbursementClaims = unresolved.sort((left, right) => left.id.localeCompare(right.id));
+  domain.auditEvents = safeLegacyAuditEvents(legacyAuditEvents, state.legacyFoundation.unresolvedReimbursementClaims);
   const metadata = migrationMetadata(state);
   metadata.reimbursementSchema7 = {
     convertedClaimCount,

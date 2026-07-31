@@ -362,8 +362,17 @@ export function rankedDestinations(state,month=state.monthly.selectedMonth) {
   const visited=new Set(state.travel.visited.map(item=>`${item.city}|${item.state}`.toLowerCase()));
   return state.travel.destinations
     .filter(item=>!visited.has(`${item.city}|${item.state}`.toLowerCase()))
-    .map(item=>({...item,score:item.baseScore+(item.bestMonths.includes(monthNumber)?5:0)-(item.est>state.preferences.maxGroundBudget?20:0)}))
-    .sort((a,b)=>b.score-a.score || a.est-b.est)
+    .map(item=>{
+      const baseScore=Number.isFinite(Number(item.baseScore)) ? Number(item.baseScore) : 0;
+      const estimate=Number.isFinite(Number(item.est)) ? Number(item.est) : 0;
+      const maxBudget=Number(state.preferences.maxGroundBudget);
+      return {
+        ...item,
+        score:baseScore+(Array.isArray(item.bestMonths) && item.bestMonths.includes(monthNumber) ? 5 : 0)
+          -(Number.isFinite(maxBudget) && estimate>maxBudget ? 20 : 0)
+      };
+    })
+    .sort((a,b)=>b.score-a.score || Number(a.est||0)-Number(b.est||0))
     .slice(0,3);
 }
 

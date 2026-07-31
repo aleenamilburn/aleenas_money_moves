@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {STATE_SCHEMA_VERSION} from '../js/domain/constants.js';
-import {upgradeStateWithMigration} from '../js/state.js';
+import {rankedDestinations, upgradeStateWithMigration} from '../js/state.js';
 import {legacyV1State} from './helpers.js';
 
 function seed() {
@@ -39,6 +39,13 @@ test('V1 UI state is hydrated into the current schema without removing V1 catego
   assert.equal(result.state.domain.legacyMonthlySnapshots.length, 1);
   assert.equal(result.state.review.transactions[0].providerPayloadRef, 'keep-this');
   assert.deepEqual(result.state.travel.destinations, original.travel.destinations);
+});
+
+test('legacy destinations without ranking metadata remain renderable', () => {
+  const state=upgradeStateWithMigration(legacyV1State(), seed(), {now:'2026-07-31T00:00:00.000Z'}).state;
+  state.travel.destinations=[{city:'Legacy City', state:'VA'}];
+
+  assert.deepEqual(rankedDestinations(state), [{city:'Legacy City', state:'VA', score:0}]);
 });
 
 test('migration preserves custom V1 rules, debts, goals, preferences, and monthly history without injecting seed data', () => {

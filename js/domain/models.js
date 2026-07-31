@@ -172,6 +172,15 @@ export function validateTransaction(value) {
   return validationResult('Transaction', value, errors);
 }
 
+function validateLegacyTransaction(value) {
+  if (!isPlainObject(value)) return validateTransaction(value);
+  const candidate = {...value};
+  if (candidate.currency !== null && (typeof candidate.currency !== 'string' || !/^[A-Z]{3}$/.test(candidate.currency))) {
+    candidate.currency = null;
+  }
+  return validateTransaction(candidate);
+}
+
 export function validateBucket(value) {
   const errors = [];
   if (!validateBaseEntity(value, 'Bucket', errors)) return validationResult('Bucket', value, errors);
@@ -204,6 +213,10 @@ export function validateAllocation(value) {
 export function validateReimbursementClaim(value) {
   const errors = [];
   if (!validateBaseEntity(value, 'ReimbursementClaim', errors)) return validationResult('ReimbursementClaim', value, errors);
+  rejectUnknownFields(value, new Set([
+    'id', 'payerLabel', 'currency', 'dueDate', 'note', 'cancelledAt', 'cancellationReason',
+    'createdAt', 'updatedAt'
+  ]), 'ReimbursementClaim', errors);
   requiredString(value.payerLabel, 'payerLabel', errors);
   requiredCurrency(value.currency, errors);
   for (const field of ['dueDate', 'note', 'cancelledAt', 'cancellationReason']) requireField(value, field, errors);
@@ -214,9 +227,6 @@ export function validateReimbursementClaim(value) {
   const hasCancelledAt = value.cancelledAt !== undefined && value.cancelledAt !== null;
   const hasCancellationReason = value.cancellationReason !== undefined && value.cancellationReason !== null;
   if (hasCancelledAt !== hasCancellationReason) errors.push('cancelledAt and cancellationReason must both exist or both be null');
-  for (const field of ['payerId', 'payerEntityId', 'payerContact', 'accountId', 'country', 'location']) {
-    if (Object.prototype.hasOwnProperty.call(value, field)) errors.push(`${field} is not part of the schema-7 payer-label claim model`);
-  }
   rejectLegacyClaimFields(value, errors);
   return validationResult('ReimbursementClaim', value, errors);
 }
@@ -414,15 +424,38 @@ function relationshipIdErrors(domain, errors) {
   }
 }
 
-function reimbursementAmounts(domain, claimId) {
+function transactionCalendarDate(transaction) {
+  for (const value of [transaction?.displayDate, transaction?.postedAt, transaction?.authorizedAt]) {
+    if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) continue;
+    if (/^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
+    return new Date(value).toISOString().slice(0, 10);
+  }
+  return null;
+}
+
+function timestampCalendarDate(value) {
+  return isTimestamp(value) ? new Date(value).toISOString().slice(0, 10) : null;
+}
+
+function reimbursementAmounts(domain, claimId, {asOf = null} = {}) {
   const expectedAmountCents = domain.reimbursementClaimAllocations
     .filter(link => link.claimId === claimId)
     .reduce((sum, link) => sum + link.amountCents, 0);
   const receivedAmountCents = domain.reimbursementPaymentLinks
-    .filter(link => link.claimId === claimId && link.voidedAt === null)
+    .filter(link => {
+      if (link.claimId !== claimId || link.voidedAt !== null) return false;
+      if (asOf === null) return true;
+      const transaction = domain.transactions.find(item => item.id === link.inflowTransactionId);
+      const effectiveDate = transactionCalendarDate(transaction);
+      return effectiveDate !== null && effectiveDate <= asOf;
+    })
     .reduce((sum, link) => sum + link.appliedAmountCents, 0);
-  const writeOffs = domain.reimbursementAdjustments.filter(item => item.claimId === claimId && item.type === 'write_off');
-  const reversals = domain.reimbursementAdjustments.filter(item => item.claimId === claimId && item.type === 'write_off_reversal');
+  const effectiveAdjustments = domain.reimbursementAdjustments.filter(item => {
+    if (item.claimId !== claimId) return false;
+    return asOf === null || timestampCalendarDate(item.effectiveAt) <= asOf;
+  });
+  const writeOffs = effectiveAdjustments.filter(item => item.type === 'write_off');
+  const reversals = effectiveAdjustments.filter(item => item.type === 'write_off_reversal');
   const writtenOffAmountCents = writeOffs.reduce((sum, item) => sum + item.amountCents, 0)
     - reversals.reduce((sum, item) => sum + item.amountCents, 0);
   return {
@@ -444,7 +477,7 @@ export function projectReimbursementClaim(domain, claimId, {asOf = null} = {}) {
   const claim = domain?.reimbursementClaims?.find(item => item.id === claimId);
   if (!claim) throw new Error(`Reimbursement claim ${claimId} does not exist.`);
   if (asOf !== null && !isCalendarDate(asOf)) throw new Error('asOf must be a valid YYYY-MM-DD calendar date.');
-  const amounts = reimbursementAmounts(domain, claimId);
+  const amounts = reimbursementAmounts(domain, claimId, {asOf});
   const status = derivedStatus(claim, amounts);
   return {
     claimId,
@@ -460,6 +493,12 @@ function validateReimbursementRelationships(domain, errors) {
   const allocations = new Map(domain.allocations.map(item => [item.id, item]));
   const transactions = new Map(domain.transactions.map(item => [item.id, item]));
   const linksByAllocation = new Map();
+
+  for (const allocation of domain.allocations) {
+    if (allocation.reimbursementClaimId !== undefined && allocation.reimbursementClaimId !== null) {
+      errors.push(`allocation ${allocation.id} has a deprecated reimbursementClaimId; schema 7 uses claim-allocation relationships`);
+    }
+  }
 
   for (const link of domain.reimbursementClaimAllocations) {
     const claim = claims.get(link.claimId);
@@ -486,7 +525,7 @@ function validateReimbursementRelationships(domain, errors) {
     if (claim.cancelledAt === null && claimLinks.length === 0) errors.push(`active claim ${claim.id} must reference at least one claim-allocation link`);
   }
 
-  const paymentFingerprints = new Set();
+  const activePaymentFingerprints = new Set();
   const activeInflowTotals = new Map();
   for (const link of domain.reimbursementPaymentLinks) {
     const claim = claims.get(link.claimId);
@@ -499,9 +538,11 @@ function validateReimbursementRelationships(domain, errors) {
       if (claim && claim.currency !== transaction.currency) errors.push(`payment link ${link.id} currency does not match claim ${claim.id}`);
       if (link.voidedAt === null) activeInflowTotals.set(transaction.id, (activeInflowTotals.get(transaction.id) || 0) + link.appliedAmountCents);
     }
-    const fingerprint = `${link.claimId}|${link.inflowTransactionId}|${link.appliedAmountCents}|${link.voidedAt === null ? 'active' : 'voided'}`;
-    if (paymentFingerprints.has(fingerprint)) errors.push(`payment link ${link.id} duplicates another payment relationship`);
-    paymentFingerprints.add(fingerprint);
+    if (link.voidedAt === null) {
+      const fingerprint = `${link.claimId}|${link.inflowTransactionId}|${link.appliedAmountCents}`;
+      if (activePaymentFingerprints.has(fingerprint)) errors.push(`payment link ${link.id} duplicates another active payment relationship`);
+      activePaymentFingerprints.add(fingerprint);
+    }
   }
   for (const [transactionId, total] of activeInflowTotals) {
     const transaction = transactions.get(transactionId);
@@ -519,7 +560,8 @@ function validateReimbursementRelationships(domain, errors) {
     else {
       if (original.claimId !== adjustment.claimId) errors.push(`adjustment ${adjustment.id} must reverse a write_off on the same claim`);
       if (adjustment.amountCents > original.amountCents) errors.push(`adjustment ${adjustment.id} reversal exceeds write_off ${original.id}`);
-      if (adjustment.createdAt < original.createdAt) errors.push(`adjustment ${adjustment.id} cannot reverse a write_off before it exists`);
+      if (Date.parse(adjustment.createdAt) < Date.parse(original.createdAt)) errors.push(`adjustment ${adjustment.id} cannot be created before its write_off`);
+      if (Date.parse(adjustment.effectiveAt) < Date.parse(original.effectiveAt)) errors.push(`adjustment ${adjustment.id} cannot take effect before its write_off`);
       if (reversedWriteOffs.has(original.id)) errors.push(`write_off ${original.id} may not be reversed more than once`);
       reversedWriteOffs.add(original.id);
     }
@@ -535,7 +577,9 @@ function validateReimbursementRelationships(domain, errors) {
     }
     let collectible = amounts.expectedAmountCents - amounts.receivedAmountCents;
     const ordered = domain.reimbursementAdjustments.filter(item => item.claimId === claim.id)
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+      .sort((left, right) => Date.parse(left.effectiveAt) - Date.parse(right.effectiveAt)
+        || Date.parse(left.createdAt) - Date.parse(right.createdAt)
+        || left.id.localeCompare(right.id));
     const activeWriteOffAmounts = new Map();
     for (const adjustment of ordered) {
       if (adjustment.type === 'write_off') {
@@ -558,7 +602,7 @@ export function validateDomainStore(domain, {legacyReimbursements = false} = {})
   if (!isPlainObject(domain)) return validationResult('DomainStore', domain, ['domain must be an object']);
   for (const [field, validator] of [
     ['accounts', validateAccount],
-    ['transactions', validateTransaction],
+    ['transactions', legacyReimbursements ? validateLegacyTransaction : validateTransaction],
     ['buckets', validateBucket],
     ['allocations', validateAllocation],
     ['merchantRules', validateMerchantRule]

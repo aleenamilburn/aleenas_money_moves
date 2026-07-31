@@ -119,6 +119,7 @@ const unresolvedCases = [
   ['nonReimbursable', 'allocation_not_reimbursable', 1],
   ['expectedExceedsAllocation', 'expected_exceeds_allocation', 1],
   ['unknownCurrency', 'unknown_currency', 1],
+  ['malformedCurrency', 'unknown_currency', 1],
   ['mixedCurrencies', 'mixed_currency', 1],
   ['duplicateRepayments', 'duplicate_repayment', 1],
   ['missingRepaymentTransaction', 'missing_repayment_transaction', 1],
@@ -153,13 +154,25 @@ test('same inflow over-applied across claims converts only the deterministic saf
   assert.deepEqual(first.legacyFoundation.unresolvedReimbursementClaims[0].reasonCodes, ['repayment_exceeds_inflow']);
 });
 
-test('the independent synthetic migration matrix yields eight safe conversions and eighteen unresolved records', () => {
+test('the independent synthetic migration matrix yields eight safe conversions and nineteen unresolved records', () => {
   const safeNames = ['safeSingle', 'safeMulti', 'safeRepayment', 'contradictoryStatus', 'invalidCancellationEvidence', 'validCancellationEvidence', 'existingAuditEvents'];
   const safeConverted = safeNames.reduce((sum, name) => sum + migrate(name).state.migration.reimbursementSchema7.convertedClaimCount, 0);
   const unsafeUnresolved = unresolvedCases.reduce((sum, [name]) => sum + migrate(name).state.migration.reimbursementSchema7.unresolvedClaimCount, 0);
   const crossClaim = migrate('inflowOverAppliedAcrossClaims').state.migration.reimbursementSchema7;
   assert.equal(safeConverted + crossClaim.convertedClaimCount, 8);
-  assert.equal(unsafeUnresolved + crossClaim.unresolvedClaimCount, 18);
+  assert.equal(unsafeUnresolved + crossClaim.unresolvedClaimCount, 19);
+});
+
+test('malformed schema-6 currency becomes explicit unknown only after exact encrypted compatibility preservation', () => {
+  const source = fixtures.malformedCurrency();
+  const result = migrateState(source, {now:migrationNow}).state;
+  assert.equal(source.domain.transactions[0].currency, 'usd');
+  assert.equal(result.domain.transactions[0].currency, null);
+  assert.deepEqual(result.legacyFoundation.reimbursementSchema6.transactionCurrencyFacts, [{
+    transactionId:'expense-single', currencyFieldPresent:true, currency:'usd'
+  }]);
+  assert.deepEqual(result.domain.reimbursementClaims, []);
+  assert.deepEqual(result.legacyFoundation.unresolvedReimbursementClaims[0].reasonCodes, ['unknown_currency']);
 });
 
 test('legacy status is evidence only, invalid cancellation is not inferred, and compatible audit events survive', () => {
@@ -209,7 +222,10 @@ test('claim validation rejects missing payer, invalid currency, unpaired cancell
   assert.match(validateReimbursementClaim({...valid, currency:'usd'}).errors.join(' '), /currency/);
   assert.match(validateReimbursementClaim({...valid, cancelledAt:createdAt}).errors.join(' '), /both exist/);
   assert.match(validateReimbursementClaim({...valid, expectedAmountCents:100}).errors.join(' '), /legacy compatibility/);
-  assert.match(validateReimbursementClaim({...valid, payerId:'payer-entity'}).errors.join(' '), /not part of/);
+  assert.match(validateReimbursementClaim({...valid, payerId:'payer-entity'}).errors.join(' '), /not an allowed field/);
+  for (const extra of ['payerEmail', 'institutionId', 'locationCountry', 'state', 'accountId']) {
+    assert.match(validateReimbursementClaim({...valid, [extra]:'fabricated'}).errors.join(' '), /not an allowed field/);
+  }
 });
 
 test('claim-allocation validation enforces amount, ownership, uniqueness, direction, currency, and active claim rules', () => {
@@ -261,16 +277,111 @@ test('payment validation enforces movement, currency, availability, claim balanc
   const duplicate = openDomain();
   addRepaymentTransaction(duplicate);
   duplicate.reimbursementPaymentLinks.push(payment('payment-duplicate-a', 100), payment('payment-duplicate-b', 100));
-  assert.match(validateDomainStore(duplicate).errors.join(' '), /duplicates another payment relationship/);
+  assert.match(validateDomainStore(duplicate).errors.join(' '), /duplicates another active payment relationship/);
 
   const invalidVoid = payment('payment-void', 100, {voidedAt:createdAt});
   assert.match(validateReimbursementPaymentLink(invalidVoid).errors.join(' '), /both exist/);
 
   const voided = openDomain();
   addRepaymentTransaction(voided);
-  voided.reimbursementPaymentLinks.push(payment('payment-voided', 500, {voidedAt:createdAt, voidReason:'Synthetic correction'}));
+  voided.reimbursementPaymentLinks.push(
+    payment('payment-voided', 500, {voidedAt:createdAt, voidReason:'Synthetic correction'}),
+    payment('payment-voided-again', 500, {voidedAt:updatedAt, voidReason:'Second synthetic correction'})
+  );
   assert.equal(validateDomainStore(voided).ok, true);
   assert.equal(projectReimbursementClaim(voided, 'claim-single').receivedAmountCents, 0);
+});
+
+test('migration treats incomplete pointers, malformed repayment fragments, and generated-ID collisions as whole unresolved claims', () => {
+  for (const [name, reason] of [
+    ['pointerOnlyOnClaim', 'allocation_pointer_mismatch'],
+    ['pointerOnlyOnAllocation', 'allocation_pointer_mismatch'],
+    ['malformedRepaymentFragment', 'malformed_claim'],
+    ['relationshipIdCollision', 'relationship_id_collision']
+  ]) {
+    const source = fixtures[name]();
+    const result = migrateState(source, {now:migrationNow}).state;
+    assert.deepEqual(result.domain.reimbursementClaims, [], name);
+    assert.deepEqual(result.domain.reimbursementClaimAllocations, [], name);
+    assert.deepEqual(result.domain.reimbursementPaymentLinks, [], name);
+    assert.deepEqual(result.domain.auditEvents, [], name);
+    assert.equal(result.legacyFoundation.unresolvedReimbursementClaims.length, 1, name);
+    assert.equal(result.legacyFoundation.unresolvedReimbursementClaims[0].reasonCodes.includes(reason), true, name);
+    assert.deepEqual(result.legacyFoundation.reimbursementSchema6.claims, source.domain.reimbursementClaims, name);
+  }
+
+  const claimIdCollision = fixtures.inflowOverAppliedAcrossClaims();
+  for (const claim of claimIdCollision.domain.reimbursementClaims) claim.repaymentLinks = [];
+  const reservedClaimId = deterministicReimbursementId(
+    'reimbursement-claim-allocation', 'claim-a', 'allocation-a'
+  );
+  claimIdCollision.domain.reimbursementClaims[1].id = reservedClaimId;
+  claimIdCollision.domain.allocations[1].reimbursementClaimId = reservedClaimId;
+  const collisionResult = migrateState(claimIdCollision, {now:migrationNow}).state;
+  assert.deepEqual(collisionResult.domain.reimbursementClaims.map(claim => claim.id), [reservedClaimId]);
+  assert.equal(collisionResult.legacyFoundation.unresolvedReimbursementClaims.length, 1);
+  assert.deepEqual(collisionResult.legacyFoundation.unresolvedReimbursementClaims[0].reasonCodes, ['relationship_id_collision']);
+
+  const competingAllocation = fixtures.inflowOverAppliedAcrossClaims();
+  for (const claim of competingAllocation.domain.reimbursementClaims) claim.repaymentLinks = [];
+  competingAllocation.domain.reimbursementClaims[1].allocationIds = ['allocation-a'];
+  const competingResult = migrateState(competingAllocation, {now:migrationNow}).state;
+  assert.deepEqual(competingResult.domain.reimbursementClaims.map(claim => claim.id), ['claim-a']);
+  assert.deepEqual(competingResult.domain.reimbursementClaimAllocations.map(link => link.claimId), ['claim-a']);
+  assert.equal(competingResult.legacyFoundation.unresolvedReimbursementClaims.length, 1);
+  assert.equal(competingResult.legacyFoundation.unresolvedReimbursementClaims[0].reasonCodes.includes('duplicate_allocation_claim'), true);
+});
+
+test('canonical migration output and unresolved identities are stable when semantically unordered source arrays are reordered', () => {
+  const source = fixtures.inflowOverAppliedAcrossClaims();
+  const reordered = structuredClone(source);
+  reordered.domain.reimbursementClaims.reverse();
+  reordered.domain.allocations.reverse();
+  reordered.domain.transactions.reverse();
+  for (const claim of reordered.domain.reimbursementClaims) claim.allocationIds.reverse();
+
+  const first = migrateState(source, {now:migrationNow}).state;
+  const second = migrateState(reordered, {now:migrationNow}).state;
+  for (const field of ['reimbursementClaims', 'reimbursementClaimAllocations', 'reimbursementPaymentLinks']) {
+    assert.deepEqual(second.domain[field], first.domain[field], field);
+  }
+  assert.deepEqual(second.legacyFoundation.unresolvedReimbursementClaims, first.legacyFoundation.unresolvedReimbursementClaims);
+
+  const payments = fixtures.safeSingle();
+  const repaymentTemplate = fixtures.safeRepayment().domain.transactions.find(item => item.id === 'repayment-safe');
+  payments.domain.transactions.push(
+    {...structuredClone(repaymentTemplate), id:'repayment-200', amountCents:200},
+    {...structuredClone(repaymentTemplate), id:'repayment-300', amountCents:300}
+  );
+  payments.domain.reimbursementClaims[0].repaymentLinks = [
+    {transactionId:'repayment-300', amountCents:300},
+    {transactionId:'repayment-200', amountCents:200}
+  ];
+  const paymentsReordered = structuredClone(payments);
+  paymentsReordered.domain.reimbursementClaims[0].repaymentLinks.reverse();
+  const migratedPayments = migrateState(payments, {now:migrationNow}).state.domain.reimbursementPaymentLinks;
+  const migratedPaymentsReordered = migrateState(paymentsReordered, {now:migrationNow}).state.domain.reimbursementPaymentLinks;
+  assert.deepEqual(migratedPaymentsReordered, migratedPayments);
+});
+
+test('one inflow can fund several claims and several inflows can fund one claim without over-application', () => {
+  const domain = openDomain();
+  domain.allocations.push({...structuredClone(domain.allocations[0]), id:'allocation-second', transactionId:'expense-second'});
+  domain.transactions.push({...structuredClone(domain.transactions[0]), id:'expense-second'});
+  domain.reimbursementClaims.push({...structuredClone(domain.reimbursementClaims[0]), id:'claim-second'});
+  domain.reimbursementClaimAllocations.push({
+    ...structuredClone(domain.reimbursementClaimAllocations[0]), id:'claim-allocation-second', claimId:'claim-second', allocationId:'allocation-second'
+  });
+  addRepaymentTransaction(domain, {id:'shared-repayment', amountCents:600});
+  addRepaymentTransaction(domain, {id:'second-repayment', amountCents:200});
+  domain.reimbursementPaymentLinks.push(
+    payment('payment-shared-a', 300, {inflowTransactionId:'shared-repayment'}),
+    payment('payment-shared-b', 300, {claimId:'claim-second', inflowTransactionId:'shared-repayment'}),
+    payment('payment-second', 200, {inflowTransactionId:'second-repayment'})
+  );
+  assert.equal(validateDomainStore(domain).ok, true);
+  assert.equal(projectReimbursementClaim(domain, 'claim-single').status, 'settled');
+  assert.equal(projectReimbursementClaim(domain, 'claim-second').remainingAmountCents, 200);
 });
 
 test('write-offs, reversals, derived status, and overdue projections are pure and exact', () => {
@@ -317,6 +428,35 @@ test('write-offs, reversals, derived status, and overdue projections are pure an
   }).ok, true);
 });
 
+test('as-of projections honor payment and adjustment effective dates and adjustment chronology', () => {
+  const domain = openDomain();
+  addRepaymentTransaction(domain, {amountCents:200});
+  domain.transactions.find(item => item.id === 'repayment-target').displayDate = '2026-07-31';
+  domain.transactions.find(item => item.id === 'repayment-target').postedAt = '2026-07-31';
+  domain.reimbursementPaymentLinks.push(payment('payment-dated', 200));
+  domain.reimbursementAdjustments.push({
+    id:'write-off-dated', claimId:'claim-single', type:'write_off', amountCents:300, reason:'Synthetic dated write-off',
+    effectiveAt:'2026-08-02T12:00:00.000Z', reversesAdjustmentId:null, createdAt:'2026-08-02T12:00:00.000Z'
+  });
+  assert.equal(validateDomainStore(domain).ok, true);
+  const before = structuredClone(domain);
+  assert.deepEqual(projectReimbursementClaim(domain, 'claim-single', {asOf:'2026-07-30'}), {
+    claimId:'claim-single', expectedAmountCents:500, receivedAmountCents:0, writtenOffAmountCents:0,
+    remainingAmountCents:500, status:'open', isOverdue:false
+  });
+  assert.equal(projectReimbursementClaim(domain, 'claim-single', {asOf:'2026-07-31'}).status, 'partially_paid');
+  assert.equal(projectReimbursementClaim(domain, 'claim-single', {asOf:'2026-08-02'}).status, 'written_off');
+  assert.deepEqual(domain, before);
+
+  const invalidChronology = structuredClone(domain);
+  invalidChronology.reimbursementAdjustments.push({
+    id:'write-off-dated-reversal', claimId:'claim-single', type:'write_off_reversal', amountCents:300,
+    reason:'Synthetic invalid chronology', effectiveAt:'2026-08-01T12:00:00.000Z',
+    reversesAdjustmentId:'write-off-dated', createdAt:'2026-08-03T12:00:00.000Z'
+  });
+  assert.match(validateDomainStore(invalidChronology).errors.join(' '), /cannot take effect before its write_off/);
+});
+
 test('partial, settled, cancelled, and invalid negative-remaining projections follow authoritative relationships', () => {
   const partial = openDomain();
   addRepaymentTransaction(partial);
@@ -353,6 +493,25 @@ test('audit-event validation requires compact cent facts and excludes copied des
   assert.match(validateAuditEvent({...valid, monetaryFacts:{merchantDescription:'Synthetic'}}).errors.join(' '), /Cents field name|safe integer cents/);
   assert.match(validateAuditEvent({...valid, providerPayload:{synthetic:true}}).errors.join(' '), /not an allowed field/);
   assert.match(validateAuditEvent({...valid, source:'automatic'}).errors.join(' '), /must be one of/);
+
+  const matchingUnrelatedId = openDomain();
+  matchingUnrelatedId.auditEvents.push({...valid, id:'expense-single'});
+  assert.equal(validateDomainStore(matchingUnrelatedId).ok, true);
+});
+
+test('migration keeps invalid or unresolved audit evidence only in compatibility storage', () => {
+  const source = fixtures.unresolvedMigrationAudit();
+  source.domain.auditEvents.push({id:'malformed-audit', copiedPayerNote:'Synthetic private note'});
+  const result = migrateState(source, {now:migrationNow}).state;
+  assert.deepEqual(result.domain.auditEvents, []);
+  assert.deepEqual(result.legacyFoundation.reimbursementSchema6.auditEvents, source.domain.auditEvents);
+  assert.equal(result.legacyFoundation.unresolvedReimbursementClaims.length, 1);
+
+  const malformedCollection = fixtures.empty();
+  malformedCollection.domain.auditEvents = {legacyShape:'preserve exactly'};
+  const malformedResult = migrateState(malformedCollection, {now:migrationNow}).state;
+  assert.deepEqual(malformedResult.domain.auditEvents, []);
+  assert.deepEqual(malformedResult.legacyFoundation.reimbursementSchema6.auditEvents, {legacyShape:'preserve exactly'});
 });
 
 test('relationship IDs are unique across canonical reimbursement collections and unresolved evidence is excluded from totals', () => {
@@ -377,4 +536,22 @@ test('schema-7 claim relationships keep the existing linked-allocation edit guar
     () => saveAllocationDraft(state, allocation.transactionId, rows, async () => {}, {now:migrationNow}),
     error => error?.code === 'CLAIM_LINKED'
   );
+});
+
+test('schema 7 rejects deprecated embedded pointers while unclaimed allocation editing remains available', async () => {
+  const invalid = migrate('safeSingle').state;
+  invalid.domain.allocations[0].reimbursementClaimId = 'claim-single';
+  assert.match(validateDomainStore(invalid.domain).errors.join(' '), /deprecated reimbursementClaimId/);
+
+  const state = migrate('safeSingle').state;
+  state.domain.reimbursementClaims = [];
+  state.domain.reimbursementClaimAllocations = [];
+  const allocation = state.domain.allocations[0];
+  const rows = [{
+    id:allocation.id, bucketId:allocation.bucketId, subBucketId:allocation.subBucketId,
+    amountCents:allocation.amountCents, ownershipType:'mine', note:'Accepted unclaimed edit'
+  }];
+  const saved = await saveAllocationDraft(state, allocation.transactionId, rows, async () => {}, {now:migrationNow});
+  assert.equal(saved[0].note, 'Accepted unclaimed edit');
+  assert.equal(state.domain.allocations[0].reimbursementClaimId, null);
 });

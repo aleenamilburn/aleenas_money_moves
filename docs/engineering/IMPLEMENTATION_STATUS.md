@@ -10,7 +10,7 @@ Last updated: 2026-07-31
 | Two-Level Sub-Buckets | IMPLEMENTED AND ACCEPTED | Exactly two levels; create, rename, reorder, move, archive/restore, rolled-up totals, validation, persistence, and browser acceptance passed. |
 | Transaction Allocations and Split Editor | IMPLEMENTED AND ACCEPTED | `V2A_TRANSACTION_ALLOCATIONS_ACCEPTANCE.md`; schema 6 migration, canonical allocation calculations, split editor, rollback, automated and browser acceptance passed. |
 | Reimbursement Design | REVIEWED | `V2A_REIMBURSEMENT_DESIGN_REVIEW.md`; all 14 product decisions approved and recorded; target entities, lifecycle, accounting, migration, service, UI workflow, validation, test, security, and acceptance contracts reviewed. No production implementation. |
-| Reimbursement Schema Foundation | IMPLEMENTED / AWAITING ACCEPTANCE | `V2A_REIMBURSEMENT_SCHEMA7_IMPLEMENTATION.md`; schema 7 entities, validation, deterministic schema-6 conversion, unresolved preservation, pure projections, and encrypted-vault tests implemented. Separate acceptance review required. |
+| Reimbursement Schema Foundation | IMPLEMENTED AND REVIEWED | `V2A_REIMBURSEMENT_SCHEMA7_ACCEPTANCE.md`; independent all-or-nothing migration, validation, compatibility, authority, encrypted-vault, recovery, regression, and browser acceptance passed. |
 | Reimbursements | NEEDS IMPLEMENTATION | Foundation models only; no user workflow or screens. |
 | Account Enrichment UI | NEEDS IMPLEMENTATION | Unknown accounts remain explicit; no enrichment screen. |
 | Location Correction UI | NEEDS IMPLEMENTATION | State/country facts display when present; no correction screen. |

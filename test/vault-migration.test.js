@@ -41,6 +41,7 @@ test('a failed V1-to-V2 restore leaves the active V2 vault untouched', async () 
 
   await assert.rejects(() => stateService.restore(futureBackup, passphrase), /newer than supported schema/);
   assert.equal(localStorage.getItem(V2_VAULT_KEY), before);
+  assert.equal((await stateService.unlock(passphrase)).state.schemaVersion, STATE_SCHEMA_VERSION);
 });
 
 test('clearing the current Money Moves vault does not delete a V1 vault', async () => {
@@ -100,6 +101,27 @@ test('a wrong passphrase does not create or overwrite either V1 or V2 vault stat
   await assert.rejects(() => stateService.unlock('still not the correct passphrase'));
   assert.equal(localStorage.getItem(V2_VAULT_KEY), v2Before);
   assert.equal(localStorage.getItem(V1_VAULT_KEY), legacyRaw);
+  assert.equal((await stateService.unlock(passphrase)).state.schemaVersion, STATE_SCHEMA_VERSION);
+});
+
+test('corrupted ciphertext is rejected without fallback, rewrite, or legacy recovery loss', async () => {
+  const passphrase = 'synthetic corrupted ciphertext passphrase';
+  const legacyRaw = await createLegacyV1Envelope(legacyV1State(), passphrase, deriveKey);
+  localStorage.setItem(V1_VAULT_KEY, legacyRaw);
+  await createVault(schema6ReimbursementFixtures.safeSingle(), passphrase);
+  const validRaw = localStorage.getItem(V2_VAULT_KEY);
+  const corrupted = JSON.parse(validRaw);
+  const ciphertext = corrupted.cipher.ciphertext;
+  corrupted.cipher.ciphertext = `${ciphertext.slice(0, -2)}${ciphertext.at(-2) === 'A' ? 'B' : 'A'}${ciphertext.at(-1)}`;
+  const corruptedRaw = JSON.stringify(corrupted);
+  localStorage.setItem(V2_VAULT_KEY, corruptedRaw);
+
+  await assert.rejects(() => service().unlock(passphrase));
+  assert.equal(localStorage.getItem(V2_VAULT_KEY), corruptedRaw);
+  assert.equal(localStorage.getItem(V1_VAULT_KEY), legacyRaw);
+
+  localStorage.setItem(V2_VAULT_KEY, validRaw);
+  assert.equal((await service().unlock(passphrase)).state.schemaVersion, 7);
 });
 
 test('a malformed active V2 record never falls back to or overwrites the legacy recovery vault', async () => {
@@ -250,4 +272,29 @@ test('schema-7 validation rejects an invalid reimbursement save before the encry
 
   await assert.rejects(() => stateService.save(invalid, unlocked.key, unlocked.meta), /amount exceeds allocation/);
   assert.equal(localStorage.getItem(V2_VAULT_KEY), before);
+});
+
+test('failed temporary ciphertext verification leaves the previous active vault usable', async () => {
+  const passphrase = 'synthetic temporary verification failure';
+  const stateService = service();
+  const created = await stateService.create(passphrase, schema6ReimbursementFixtures.safeSingle());
+  const before = localStorage.getItem(V2_VAULT_KEY);
+  const storage = localStorage;
+  const originalSetItem = storage.setItem.bind(storage);
+  storage.setItem = (key, value) => {
+    if (key !== V2_TEMP_VAULT_KEY) return originalSetItem(key, value);
+    const temporary = JSON.parse(value);
+    temporary.cipher.ciphertext = temporary.cipher.ciphertext.slice(0, -4) + 'AAAA';
+    return originalSetItem(key, JSON.stringify(temporary));
+  };
+
+  const changed = structuredClone(created.state);
+  changed.preferences.syntheticAcceptanceChange = true;
+  await assert.rejects(() => stateService.save(changed, created.key, created.meta));
+  assert.equal(localStorage.getItem(V2_VAULT_KEY), before);
+
+  storage.setItem = originalSetItem;
+  localStorage.removeItem(V2_TEMP_VAULT_KEY);
+  const recovered = await stateService.unlock(passphrase);
+  assert.equal(recovered.state.preferences.syntheticAcceptanceChange, undefined);
 });

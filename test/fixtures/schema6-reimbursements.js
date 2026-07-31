@@ -106,9 +106,16 @@ export const schema6ReimbursementFixtures = {
     return state;
   },
   pointerDisagreement:() => singleClaimState({pointer:'different-claim'}),
+  pointerOnlyOnClaim:() => singleClaimState({pointer:null}),
+  pointerOnlyOnAllocation:() => {
+    const state = singleClaimState();
+    state.domain.reimbursementClaims[0].allocationIds = [];
+    return state;
+  },
   nonReimbursable:() => singleClaimState({ownershipType:'mine'}),
   expectedExceedsAllocation:() => singleClaimState({expectedAmountCents:1200}),
   unknownCurrency:() => singleClaimState({transactionCurrency:null}),
+  malformedCurrency:() => singleClaimState({transactionCurrency:'usd'}),
   mixedCurrencies:() => {
     const state = emptySchema6ReimbursementState();
     state.domain.transactions.push(
@@ -127,6 +134,11 @@ export const schema6ReimbursementFixtures = {
     const state = withRepayment(singleClaimState(), {transactionId:'repayment-duplicate', amountCents:250});
     state.domain.transactions.find(item => item.id === 'repayment-duplicate').amountCents = 500;
     state.domain.reimbursementClaims[0].repaymentLinks.push({transactionId:'repayment-duplicate', amountCents:250});
+    return state;
+  },
+  malformedRepaymentFragment:() => {
+    const state = singleClaimState();
+    state.domain.reimbursementClaims[0].repaymentLinks.push(null);
     return state;
   },
   missingRepaymentTransaction:() => {
@@ -196,6 +208,27 @@ export const schema6ReimbursementFixtures = {
       relatedEntityIds:['allocation-single'], occurredAt:createdAt, source:'migration', reason:null,
       monetaryFacts:{expectedAmountCents:500}, operationGroupId:null
     });
+    return state;
+  },
+  unresolvedMigrationAudit:() => {
+    const state = singleClaimState({pointer:'different-claim'});
+    state.domain.auditEvents.push({
+      id:'audit-unresolved-conversion', entityType:'reimbursement_claim', entityId:'claim-single', action:'converted',
+      relatedEntityIds:['allocation-single'], occurredAt:createdAt, source:'migration', reason:null,
+      monetaryFacts:{expectedAmountCents:500}, operationGroupId:null
+    });
+    return state;
+  },
+  relationshipIdCollision:() => {
+    const state = emptySchema6ReimbursementState();
+    state.domain.transactions.push(transaction('expense-collision', -1000, {movementType:'expense'}));
+    state.domain.allocations.push(
+      allocation('c1z2edalkfvr9', 'expense-collision', 400, {reimbursementClaimId:'claim-collision'}),
+      allocation('c1cbjpyqe0765l', 'expense-collision', 600, {reimbursementClaimId:'claim-collision'})
+    );
+    state.domain.reimbursementClaims.push(claim(
+      'claim-collision', ['c1z2edalkfvr9', 'c1cbjpyqe0765l'], 1000
+    ));
     return state;
   },
   duplicateIdentifiers:() => {

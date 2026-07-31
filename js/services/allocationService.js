@@ -212,7 +212,8 @@ function persistedAllocations(state, transactionId, rows, now) {
       amountCents:row.amountCents,
       ownershipType:row.ownershipType,
       note:clean(row.note) || null,
-      reimbursementClaimId:prior?.reimbursementClaimId || null,
+      // Schema 7 claim authority lives only in reimbursementClaimAllocations.
+      reimbursementClaimId:null,
       createdAt:prior?.createdAt || now,
       updatedAt:now
     };
@@ -243,7 +244,7 @@ export async function saveAllocationDraft(state, transactionId, rows, persist, o
     const d = domain(state);
     const existing = d.allocations.filter(item => item.transactionId === transactionId);
     const canonicalClaimAllocationIds = new Set((d.reimbursementClaimAllocations || []).map(item => item.allocationId));
-    if (existing.some(item => item.reimbursementClaimId || canonicalClaimAllocationIds.has(item.id))) {
+    if (existing.some(item => canonicalClaimAllocationIds.has(item.id))) {
       throw new AllocationOperationError('Allocations linked to a reimbursement claim cannot be edited in this phase.', 'CLAIM_LINKED');
     }
     const transaction = ensureCanonicalTransaction(state, transactionId, now);

@@ -1,8 +1,10 @@
 # Money Moves V2A Phase 3A: Schema 7 Reimbursement Foundation
 
 Date: 2026-07-31  
-Status: **IMPLEMENTED / AWAITING ACCEPTANCE**  
+Status: **IMPLEMENTED AND REVIEWED**
 Product workflow status: **Reimbursements remain NEEDS IMPLEMENTATION**
+
+Independent acceptance: `V2A_REIMBURSEMENT_SCHEMA7_ACCEPTANCE.md`
 
 ## Scope
 
@@ -174,7 +176,7 @@ The synthetic fixture matrix verifies the following reason codes:
 
 The implementation also defines safe reason paths for malformed claims, invalid timestamps, missing allocation transactions, non-expense allocation sources, duplicate allocation claims, and deterministic relationship-ID collision.
 
-Across the independent synthetic fixture matrix, 8 claims convert safely and 18 claim records are preserved unresolved. The cross-claim inflow-capacity fixture deterministically converts the first safe claim and preserves the second whole; no fixture creates partial canonical facts for an unsafe claim.
+Across the acceptance-hardened independent synthetic fixture matrix, 8 claims convert safely and 19 claim records are preserved unresolved. The cross-claim inflow-capacity fixture deterministically converts the first safe claim and preserves the second whole; no fixture creates partial canonical facts for an unsafe claim.
 
 Unresolved records are not canonical receivables and do not participate in projections or validation totals.
 
