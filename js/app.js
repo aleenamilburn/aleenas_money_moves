@@ -1,6 +1,7 @@
 import {parseCsv, rowsToTransactions} from './csv.js';
 import {createVaultRepository} from './services/vaultRepository.js';
 import {createStateService} from './services/stateService.js';
+import {advanceStateRevision} from './services/stateRevision.js';
 import {
   listBuckets, createBucket, updateBucket as updateDomainBucket, reorderBucket as reorderDomainBucket,
   moveChildBucket, archiveBucket, restoreBucket, queryBucketDetail, applyBucketChangeWithRollback
@@ -27,6 +28,7 @@ const stateService = createStateService({
 let state = null;
 let activeKey = null;
 let keyMeta = null;
+let vaultGeneration = null;
 let saveChain = Promise.resolve();
 let inactivityTimer = null;
 let lastActivity = Date.now();
@@ -41,6 +43,14 @@ let archivingBucketId = null;
 let allocationDraft = null;
 let allocationDraftDirty = false;
 let allocationEditorSource = null;
+let externalVaultChangeObserved = false;
+
+const clone = value => JSON.parse(JSON.stringify(value));
+
+function restoreObject(target,snapshot) {
+  for (const key of Object.keys(target)) delete target[key];
+  Object.assign(target,snapshot);
+}
 
 function setMessage(id,message,isError=false) {
   const node=$(id);
@@ -66,7 +76,8 @@ function enterApp() {
 
 function lockApp() {
   if (allocationDraft) closeAllocationEditor();
-  activeKey=null; keyMeta=null; state=null;
+  activeKey=null; keyMeta=null; vaultGeneration=null; state=null;
+  externalVaultChangeObserved=false;
   clearTimeout(inactivityTimer);
   $('unlockPass').value='';
   showPanel('unlock');
@@ -80,11 +91,42 @@ function resetInactivity() {
 }
 
 async function persist() {
-  if (!state || !activeKey || !keyMeta) return;
-  const snapshot=JSON.parse(JSON.stringify(state));
-  saveChain=saveChain.catch(()=>{}).then(async()=>{ keyMeta=(await stateService.save(snapshot,activeKey,keyMeta)).meta; });
+  if (!state || !activeKey || !keyMeta || !vaultGeneration) return;
+  const snapshot=clone(state);
+  saveChain=saveChain.catch(()=>{}).then(async()=>{
+    const saved=await stateService.save(snapshot,activeKey,keyMeta,{expectedVaultGeneration:vaultGeneration});
+    keyMeta=saved.meta;
+    vaultGeneration=saved.vaultGeneration;
+    externalVaultChangeObserved=false;
+  });
   try { await saveChain; }
-  catch(error) { console.error('Save failed',error); throw error; }
+  catch(error) {
+    if (error?.code === 'VAULT_CONFLICT') showVaultConflict();
+    else console.error('Save failed',error);
+    throw error;
+  }
+}
+
+async function applyCanonicalChange(change) {
+  const before=clone(state);
+  try {
+    const result=change();
+    if (JSON.stringify(state) === JSON.stringify(before)) return result;
+    advanceStateRevision(state);
+    await persist();
+    return result;
+  } catch(error) {
+    restoreObject(state,before);
+    throw error;
+  }
+}
+
+function showVaultConflict() {
+  $('vaultConflictBanner').classList.remove('hidden');
+}
+
+function hideVaultConflict() {
+  $('vaultConflictBanner').classList.add('hidden');
 }
 
 function humanCategory(value) {
@@ -186,8 +228,10 @@ function renderReview() {
     document.querySelectorAll('.bucket-choice').forEach(button=>button.addEventListener('click',async()=>{
       const selected=state.domain.buckets.find(item=>item.id===button.dataset.bucket);
       if (!selected) {
-        assignBucket(state,tx.id,button.dataset.bucket,$('rememberRule').checked);
-        await persist(); renderAll();
+        try {
+          await applyCanonicalChange(()=>assignBucket(state,tx.id,button.dataset.bucket,$('rememberRule').checked));
+          renderAll();
+        } catch(error) { alert(error.message); }
         return;
       }
       try {
@@ -473,8 +517,10 @@ function renderTravel() {
     ? state.travel.visited.map(item=>`<button class="chip" data-remove-visited="${item.id}">${escapeHtml(item.city)}, ${escapeHtml(item.state)} ×</button>`).join('')
     : '<p>No visited cities added yet.</p>';
   document.querySelectorAll('[data-remove-visited]').forEach(button=>button.addEventListener('click',async()=>{
-    state.travel.visited=state.travel.visited.filter(item=>item.id!==button.dataset.removeVisited);
-    await persist();renderTravel();
+    try {
+      await applyCanonicalChange(()=>{state.travel.visited=state.travel.visited.filter(item=>item.id!==button.dataset.removeVisited);});
+      renderTravel();
+    } catch(error) { alert(error.message); }
   }));
 }
 
@@ -539,8 +585,7 @@ async function importSelectedFile(file) {
   try {
     const rows=parseCsv(await file.text());
     const converted=rowsToTransactions(rows,state.review.importSettings);
-    const result=addTransactions(state,converted.transactions,'csv');
-    await persist();
+    const result=await applyCanonicalChange(()=>addTransactions(state,converted.transactions,'csv'));
     setMessage('importMessage',`${result.imported} imported · ${result.duplicates} duplicates skipped${converted.rejected.length?` · ${converted.rejected.length} rejected`:''}`);
     renderAll();
     selectScreen('review');
@@ -559,7 +604,8 @@ function bindEvents() {
     try {
       const created=await stateService.create(pass,setupState);
       state=created.state;
-      activeKey=created.key;keyMeta=created.meta;
+      activeKey=created.key;keyMeta=created.meta;vaultGeneration=created.vaultGeneration;
+      hideVaultConflict();
       $('newPass').value='';$('confirmPass').value='';
       enterApp();
     } catch(error){setMessage('lockMessage',error.message||'Could not create the vault.',true);}
@@ -567,15 +613,16 @@ function bindEvents() {
   $('unlockVault').addEventListener('click',async()=>{
     try {
       const result=await stateService.unlock($('unlockPass').value);
-      state=result.state;activeKey=result.key;keyMeta=result.meta;
+      state=result.state;activeKey=result.key;keyMeta=result.meta;vaultGeneration=result.vaultGeneration;
+      hideVaultConflict();
       $('unlockPass').value='';
       enterApp();
     } catch {setMessage('lockMessage','Incorrect passphrase or damaged vault.',true);}
   });
   $('unlockPass').addEventListener('keydown',event=>{if(event.key==='Enter')$('unlockVault').click();});
   document.querySelectorAll('.nav-item').forEach(button=>button.addEventListener('click',()=>selectScreen(button.dataset.screen)));
-  $('monthSelect').addEventListener('change',async()=>{state.monthly.selectedMonth=$('monthSelect').value;await persist();renderAll();});
-  $('weekSelect').addEventListener('change',async()=>{state.review.selectedWeek=$('weekSelect').value;await persist();renderReview();});
+  $('monthSelect').addEventListener('change',async()=>{try{await applyCanonicalChange(()=>{state.monthly.selectedMonth=$('monthSelect').value;});renderAll();}catch(error){alert(error.message);renderAll();}});
+  $('weekSelect').addEventListener('change',async()=>{try{await applyCanonicalChange(()=>{state.review.selectedWeek=$('weekSelect').value;});renderReview();}catch(error){alert(error.message);renderReview();}});
   $('lockNow').addEventListener('click',()=>{if(discardAllocationDraft())lockApp();});
   $('addAllocationRow').addEventListener('click',()=>{addAllocationDraftRow(allocationDraft);allocationDraftDirty=true;renderAllocationEditor();});
   $('revertSingleAllocation').addEventListener('click',()=>{
@@ -600,16 +647,20 @@ function bindEvents() {
   $('visitedForm').addEventListener('submit',async event=>{
     event.preventDefault();
     try {
-      addVisited(state,$('visitedCity').value,$('visitedState').value);
+      await applyCanonicalChange(()=>addVisited(state,$('visitedCity').value,$('visitedState').value));
       $('visitedCity').value='';$('visitedState').value='';
-      await persist();renderTravel();
+      renderTravel();
     } catch(error){alert(error.message);}
   });
   $('savePreferences').addEventListener('click',async()=>{
-    state.preferences.monthlyIncome=Math.max(0,Number($('monthlyIncome').value)||0);
-    state.preferences.showScripture=$('showScripture').checked;
-    state.preferences.lockMinutes=Number($('lockMinutes').value)||60;
-    await persist();resetInactivity();renderAll();
+    try {
+      await applyCanonicalChange(()=>{
+        state.preferences.monthlyIncome=Math.max(0,Number($('monthlyIncome').value)||0);
+        state.preferences.showScripture=$('showScripture').checked;
+        state.preferences.lockMinutes=Number($('lockMinutes').value)||60;
+      });
+      resetInactivity();renderAll();
+    } catch(error) { alert(error.message);renderSettings(); }
   });
   $('changePassphrase').addEventListener('click',async()=>{
     const current=prompt('Enter your current passphrase.');
@@ -620,10 +671,13 @@ function bindEvents() {
     const confirmNext=prompt('Enter the new passphrase again.');
     if (next!==confirmNext) return alert('The new passphrases do not match.');
     try {
-      const result=await stateService.changePassphrase(state,current,next);
-      state=result.state;activeKey=result.key;keyMeta=result.meta;
+      const result=await stateService.changePassphrase(state,current,next,{expectedVaultGeneration:vaultGeneration});
+      state=result.state;activeKey=result.key;keyMeta=result.meta;vaultGeneration=result.vaultGeneration;
       alert('Passphrase changed.');
-    } catch {alert('The current passphrase was incorrect.');}
+    } catch(error) {
+      if (error?.code === 'VAULT_CONFLICT') { showVaultConflict();alert(error.message); }
+      else alert('The current passphrase was incorrect.');
+    }
   });
   $('exportBackup').addEventListener('click',()=>{
     try {
@@ -640,11 +694,16 @@ function bindEvents() {
     if (!file) return;
     const passphrase=prompt('Enter the passphrase for this encrypted backup.');
     if (!passphrase) return;
+    const expectedVaultGeneration=vaultGeneration;
     try {
-      const restored=await stateService.restore(await file.text(),passphrase);
-      state=restored.state;activeKey=restored.key;keyMeta=restored.meta;
+      const restored=await stateService.restore(await file.text(),passphrase,{expectedVaultGeneration});
+      state=restored.state;activeKey=restored.key;keyMeta=restored.meta;vaultGeneration=restored.vaultGeneration;
+      hideVaultConflict();
       renderAll();alert('Backup restored.');
-    } catch {alert('The backup or passphrase could not be verified.');}
+    } catch(error) {
+      if (error?.code === 'VAULT_CONFLICT') { showVaultConflict();alert(error.message); }
+      else alert('The backup or passphrase could not be verified.');
+    }
   });
   $('resetVault').addEventListener('click',()=>{
     if (!confirm('Erase the encrypted local vault from this browser? Export a backup first.')) return;
@@ -658,6 +717,17 @@ function bindEvents() {
       const timeout=Number(state.preferences.lockMinutes||60)*60*1000;
       if (Date.now()-lastActivity>=timeout) lockApp(); else resetInactivity();
     }
+  });
+  window.addEventListener('storage',event=>{
+    if (!state || !vaultRepository.isActiveVaultStorageKey(event.key)) return;
+    externalVaultChangeObserved=true;
+    showVaultConflict();
+  });
+  $('dismissVaultConflict').addEventListener('click',hideVaultConflict);
+  $('reloadVaultAfterConflict').addEventListener('click',()=>{
+    if (allocationDraftDirty && !confirm('Reloading will discard the unsaved allocation draft. Continue?')) return;
+    lockApp();
+    setMessage('lockMessage','Enter your passphrase to load the latest vault.');
   });
 }
 

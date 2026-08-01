@@ -29,6 +29,8 @@ export const REIMBURSEMENT_ERROR_CODES = Object.freeze({
   INVALID_CLAIM_AMOUNT:'INVALID_CLAIM_AMOUNT',
   FINAL_CLAIM_ALLOCATION_REQUIRED:'FINAL_CLAIM_ALLOCATION_REQUIRED',
   DUPLICATE_PAYMENT_CLAIM:'DUPLICATE_PAYMENT_CLAIM',
+  DUPLICATE_PAYMENT_ROW:'DUPLICATE_PAYMENT_ROW',
+  INVALID_PAYMENT_ROW:'INVALID_PAYMENT_ROW',
   DUPLICATE_PAYMENT_LINK:'DUPLICATE_PAYMENT_LINK',
   WRITE_OFF_NOT_FOUND:'WRITE_OFF_NOT_FOUND',
   WRITE_OFF_ALREADY_REVERSED:'WRITE_OFF_ALREADY_REVERSED',
@@ -39,8 +41,8 @@ export const REIMBURSEMENT_ERROR_CODES = Object.freeze({
 });
 
 export class ReimbursementServiceError extends Error {
-  constructor(message, code = REIMBURSEMENT_ERROR_CODES.INVALID_OPERATION, details = null, cause = null) {
-    super(message, cause ? {cause} : undefined);
+  constructor(message, code = REIMBURSEMENT_ERROR_CODES.INVALID_OPERATION, details = null) {
+    super(message);
     this.name = 'ReimbursementServiceError';
     this.code = code;
     this.details = details;
@@ -168,23 +170,18 @@ async function mutateAtomically(state, expectedRevision, persist, options, opera
     try {
       await persist();
     } catch (error) {
+      if (error?.code === 'VAULT_CONFLICT') throw error;
       throw new ReimbursementServiceError(
         'The reimbursement change could not be saved.',
-        REIMBURSEMENT_ERROR_CODES.PERSISTENCE_FAILED,
-        null,
-        error
+        REIMBURSEMENT_ERROR_CODES.PERSISTENCE_FAILED
       );
     }
     return typeof result === 'function' ? result() : clone(result);
   } catch (error) {
     restoreObject(state, before);
+    if (error?.code === 'VAULT_CONFLICT') throw error;
     if (error instanceof ReimbursementServiceError) throw error;
-    throw new ReimbursementServiceError(
-      'The reimbursement operation failed.',
-      REIMBURSEMENT_ERROR_CODES.DOMAIN_INVALID,
-      null,
-      error
-    );
+    throw new ReimbursementServiceError('The reimbursement operation failed.', REIMBURSEMENT_ERROR_CODES.DOMAIN_INVALID);
   }
 }
 
@@ -503,7 +500,8 @@ function transactionCalendarDate(transaction) {
 
 export function createPaymentDistributionDraft(state, inflowTransactionId, input = {}) {
   reimbursementInflow(domain(state), inflowTransactionId);
-  return {expectedRevision:getStateRevision(state), inflowTransactionId, source:input.source ?? 'user_linked', rows:clone(input.rows || [])};
+  const rows = clone(input.rows || []).map(row => ({...row, id:row?.id ?? crypto.randomUUID()}));
+  return {expectedRevision:getStateRevision(state), inflowTransactionId, source:input.source ?? 'user_linked', rows};
 }
 
 export function validatePaymentDistribution(state, draft) {
@@ -516,12 +514,17 @@ export function validatePaymentDistribution(state, draft) {
     if (!Array.isArray(draft?.rows) || draft.rows.length === 0) {
       throw serviceError(REIMBURSEMENT_ERROR_CODES.INVALID_CLAIM_AMOUNT, 'Add at least one payment distribution row.');
     }
-    const seen = new Set();
+    const seenRows = new Set();
+    const seenClaims = new Set();
     let totalAmountCents = 0;
     const rows = draft.rows.map(row => {
+      const id = clean(row?.id);
+      if (!id) throw serviceError(REIMBURSEMENT_ERROR_CODES.INVALID_PAYMENT_ROW, 'Each payment distribution row needs an identifier.');
+      if (seenRows.has(id)) throw serviceError(REIMBURSEMENT_ERROR_CODES.DUPLICATE_PAYMENT_ROW, `Payment distribution row ${id} appears more than once.`);
+      seenRows.add(id);
       const claimId = clean(row?.claimId);
-      if (!claimId || seen.has(claimId)) throw serviceError(REIMBURSEMENT_ERROR_CODES.DUPLICATE_PAYMENT_CLAIM, 'Each claim may appear once in a distribution.');
-      seen.add(claimId);
+      if (!claimId || seenClaims.has(claimId)) throw serviceError(REIMBURSEMENT_ERROR_CODES.DUPLICATE_PAYMENT_CLAIM, 'Each claim may appear once in a distribution.');
+      seenClaims.add(claimId);
       const claim = claimById(d, claimId, {active:true});
       if (claim.currency !== inflow.currency) throw serviceError(REIMBURSEMENT_ERROR_CODES.MIXED_CURRENCY, `Claim ${claim.id} does not match inflow currency.`);
       if (!isCents(row?.amountCents)) throw serviceError(REIMBURSEMENT_ERROR_CODES.INVALID_CLAIM_AMOUNT, `Claim ${claim.id} needs a positive payment amount.`);
@@ -532,7 +535,7 @@ export function validatePaymentDistribution(state, draft) {
       const remaining = projectReimbursementClaim(d, claim.id).remainingAmountCents;
       if (row.amountCents > remaining) throw serviceError(REIMBURSEMENT_ERROR_CODES.PAYMENT_EXCEEDS_CLAIM, `Payment exceeds the ${remaining}-cent remaining amount for claim ${claim.id}.`);
       totalAmountCents += row.amountCents;
-      return {claimId, amountCents:row.amountCents, note:clean(row.note) || null};
+      return {id, claimId, amountCents:row.amountCents, note:clean(row.note) || null};
     });
     const availableAmountCents = inflow.amountCents - activeInflowApplied(d, inflow.id);
     if (totalAmountCents > availableAmountCents) {

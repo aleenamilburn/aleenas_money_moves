@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {migrateState} from '../js/domain/migrations.js';
-import {UNKNOWN_ACCOUNT_ID} from '../js/domain/constants.js';
+import {UNKNOWN_ACCOUNT_ID, V2_TEMP_VAULT_KEY, V2_VAULT_KEY} from '../js/domain/constants.js';
 import {validateDomainStore} from '../js/domain/models.js';
 import {createStateService} from '../js/services/stateService.js';
 import {createVaultRepository} from '../js/services/vaultRepository.js';
@@ -565,4 +565,320 @@ test('successful audit actions use approved names, groups, safe facts, and faile
   const beforeFailureCount = state.domain.auditEvents.length;
   await rejectsCode(createWriteOff(state, {...createWriteOffDraft(state, claim.id, {reason:'Too much', effectiveAt:later}), amountCents:9999}, async () => {}, options()), REIMBURSEMENT_ERROR_CODES.WRITE_OFF_EXCEEDS_REMAINING);
   assert.equal(state.domain.auditEvents.length, beforeFailureCount);
+});
+
+test('payment drafts assign stable row IDs and reject missing or duplicate row IDs before claim-row validation', async () => {
+  const state = stateFrom();
+  const firstAllocation = addExpense(state, 'row-first', 500);
+  const secondAllocation = addExpense(state, 'row-second', 500);
+  const first = await makeClaim(state, [{allocationId:firstAllocation, amountCents:500}]);
+  const second = await makeClaim(state, [{allocationId:secondAllocation, amountCents:500}]);
+  const inflow = addInflow(state, 'row-identities', 500);
+  const draft = createPaymentDistributionDraft(state, inflow, {rows:[
+    {claimId:first.id, amountCents:200},
+    {claimId:second.id, amountCents:200}
+  ]});
+
+  assert.equal(draft.rows.every(row => typeof row.id === 'string' && row.id.length > 0), true);
+  assert.equal(new Set(draft.rows.map(row => row.id)).size, 2);
+  assert.equal(validatePaymentDistribution(state, draft).ok, true);
+
+  const missing = structuredClone(draft);
+  missing.rows[0].id = ' ';
+  assert.equal(validatePaymentDistribution(state, missing).errors[0].code, REIMBURSEMENT_ERROR_CODES.INVALID_PAYMENT_ROW);
+
+  const duplicate = structuredClone(draft);
+  duplicate.rows[1].id = duplicate.rows[0].id;
+  duplicate.rows[1].claimId = duplicate.rows[0].claimId;
+  assert.equal(validatePaymentDistribution(state, duplicate).errors[0].code, REIMBURSEMENT_ERROR_CODES.DUPLICATE_PAYMENT_ROW);
+  const before = structuredClone(state);
+  await rejectsCode(applyPaymentDistribution(state, duplicate, async () => assert.fail('must not persist'), options()), REIMBURSEMENT_ERROR_CODES.DUPLICATE_PAYMENT_ROW);
+  assert.deepEqual(state, before);
+});
+
+test('same-revision drafts serialize, failed persistence hides raw errors, and revision overflow rolls back', async () => {
+  const state = stateFrom();
+  const firstAllocation = addExpense(state, 'revision-first', 500);
+  const secondAllocation = addExpense(state, 'revision-second', 500);
+  const firstDraft = createClaimDraft(state, {payerLabel:'First', allocationIds:[firstAllocation]});
+  const secondDraft = createClaimDraft(state, {payerLabel:'Second', allocationIds:[secondAllocation]});
+  await createClaim(state, firstDraft, async () => {}, options());
+  const afterFirst = structuredClone(state);
+  await rejectsCode(createClaim(state, secondDraft, async () => assert.fail('must not persist'), options()), REIMBURSEMENT_ERROR_CODES.STALE_STATE);
+  assert.deepEqual(state, afterFirst);
+
+  const current = createClaimDraft(state, {payerLabel:'Second', allocationIds:[secondAllocation]});
+  const beforeFailure = structuredClone(state);
+  let mapped;
+  try {
+    await createClaim(state, current, async () => { throw new Error('raw encrypted storage secret'); }, options());
+  } catch (error) {
+    mapped = error;
+  }
+  assert.equal(mapped?.code, REIMBURSEMENT_ERROR_CODES.PERSISTENCE_FAILED);
+  assert.equal(mapped?.message, 'The reimbursement change could not be saved.');
+  assert.equal(Object.hasOwn(mapped, 'cause'), false);
+  assert.equal(JSON.stringify(mapped).includes('raw encrypted storage secret'), false);
+  assert.deepEqual(state, beforeFailure);
+
+  const overflow = structuredClone(state);
+  overflow.stateRevision = Number.MAX_SAFE_INTEGER;
+  const overflowDraft = createClaimDraft(overflow, {payerLabel:'Second', allocationIds:[secondAllocation]});
+  const beforeOverflow = structuredClone(overflow);
+  await rejectsCode(createClaim(overflow, overflowDraft, async () => assert.fail('must not persist'), options()), REIMBURSEMENT_ERROR_CODES.DOMAIN_INVALID);
+  assert.deepEqual(overflow, beforeOverflow);
+});
+
+test('ID collisions during claim, distribution, and manual-repayment construction restore every collection and revision', async () => {
+  const claimState = stateFrom();
+  const allocationId = addExpense(claimState, 'claim-id-collision', 500);
+  const claimDraft = createClaimDraft(claimState, {payerLabel:'Payer', allocationIds:[allocationId]});
+  const beforeClaim = structuredClone(claimState);
+  const claimIds = ['claim-new', 'group-new', 'claim-link-new', 'claim-new'];
+  await rejectsCode(createClaim(claimState, claimDraft, async () => assert.fail('must not persist'), {now, idFactory:() => claimIds.shift()}), REIMBURSEMENT_ERROR_CODES.INVALID_OPERATION);
+  assert.deepEqual(claimState, beforeClaim);
+
+  const distributionState = stateFrom();
+  const firstAllocation = addExpense(distributionState, 'distribution-id-first', 500);
+  const secondAllocation = addExpense(distributionState, 'distribution-id-second', 500);
+  const firstClaim = await makeClaim(distributionState, [{allocationId:firstAllocation, amountCents:500}]);
+  const secondClaim = await makeClaim(distributionState, [{allocationId:secondAllocation, amountCents:500}]);
+  const inflow = addInflow(distributionState, 'distribution-id-collision', 500);
+  const distribution = createPaymentDistributionDraft(distributionState, inflow, {rows:[
+    {claimId:firstClaim.id, amountCents:200},
+    {claimId:secondClaim.id, amountCents:200}
+  ]});
+  const beforeDistribution = structuredClone(distributionState);
+  const distributionIds = ['group-distribution', 'link-distribution', 'audit-distribution', 'link-distribution'];
+  await rejectsCode(applyPaymentDistribution(distributionState, distribution, async () => assert.fail('must not persist'), {now, idFactory:() => distributionIds.shift()}), REIMBURSEMENT_ERROR_CODES.INVALID_OPERATION);
+  assert.deepEqual(distributionState, beforeDistribution);
+
+  for (const collision of ['transaction', 'link', 'audit']) {
+    const state = stateFrom();
+    const sourceAllocation = addExpense(state, `manual-${collision}`, 500);
+    const claim = await makeClaim(state, [{allocationId:sourceAllocation, amountCents:500}]);
+    const draft = createManualRepaymentDraft(state, claim.id, {amountCents:100, date:'2026-08-03'});
+    const before = structuredClone(state);
+    const existingTransactionId = state.domain.transactions[0].id;
+    const existingRelationshipId = state.domain.auditEvents[0].id;
+    const generated = collision === 'transaction'
+      ? ['group-manual', existingTransactionId, 'link-manual', 'audit-manual-a', 'audit-manual-b']
+      : collision === 'link'
+        ? ['group-manual', 'transaction-manual', existingRelationshipId]
+        : ['group-manual', 'transaction-manual', 'link-manual', existingRelationshipId];
+    const expectedCode = collision === 'transaction' ? REIMBURSEMENT_ERROR_CODES.DOMAIN_INVALID : REIMBURSEMENT_ERROR_CODES.INVALID_OPERATION;
+    await rejectsCode(recordManualRepayment(state, draft, async () => assert.fail('must not persist'), {now, idFactory:() => generated.shift()}), expectedCode);
+    assert.deepEqual(state, before, collision);
+  }
+});
+
+test('stable service errors cover missing, cancelled, malformed, chronology, and persistence boundaries', async () => {
+  const state = stateFrom();
+  const allocationId = addExpense(state, 'error-contract', 500);
+  const claim = await makeClaim(state, [{allocationId, amountCents:500}]);
+
+  await rejectsCode(cancelClaim(state, {claimId:'missing-claim', reason:'x', expectedRevision:state.stateRevision}, async () => {}, options()), REIMBURSEMENT_ERROR_CODES.CLAIM_NOT_FOUND);
+  await rejectsCode(cancelClaim(state, {claimId:claim.id, reason:' ', expectedRevision:state.stateRevision}, async () => {}, options()), REIMBURSEMENT_ERROR_CODES.INVALID_REASON);
+  await rejectsCode(createWriteOff(state, {...createWriteOffDraft(state, claim.id), reason:'x'}, async () => {}, options()), REIMBURSEMENT_ERROR_CODES.INVALID_DATE);
+  await rejectsCode(reverseWriteOff(state, {adjustmentId:'missing-write-off', reason:'x', effectiveAt:later, expectedRevision:state.stateRevision}, async () => {}, options()), REIMBURSEMENT_ERROR_CODES.WRITE_OFF_NOT_FOUND);
+  await rejectsCode(voidPaymentLink(state, {paymentLinkId:'missing-payment', reason:'x', expectedRevision:state.stateRevision}, async () => {}, options()), REIMBURSEMENT_ERROR_CODES.PAYMENT_NOT_FOUND);
+
+  const inflow = addInflow(state, 'error-contract', 500);
+  const invalidAmount = createPaymentDistributionDraft(state, inflow, {rows:[{claimId:claim.id, amountCents:0}]});
+  assert.equal(validatePaymentDistribution(state, invalidAmount).errors[0].code, REIMBURSEMENT_ERROR_CODES.INVALID_CLAIM_AMOUNT);
+  const invalidSource = createPaymentDistributionDraft(state, inflow, {source:'automatic', rows:[{claimId:claim.id, amountCents:1}]});
+  assert.equal(validatePaymentDistribution(state, invalidSource).errors[0].code, REIMBURSEMENT_ERROR_CODES.INVALID_OPERATION);
+
+  const adjustment = await createWriteOff(state, createWriteOffDraft(state, claim.id, {amountCents:100, reason:'Uncollectible', effectiveAt:later}), async () => {}, options(later));
+  assert.equal(adjustment.writtenOffAmountCents, 100);
+  await rejectsCode(reverseWriteOff(state, {
+    adjustmentId:state.domain.reimbursementAdjustments.at(-1).id,
+    reason:'Too early', effectiveAt:now, expectedRevision:state.stateRevision
+  }, async () => {}, options(later)), REIMBURSEMENT_ERROR_CODES.INVALID_ADJUSTMENT_CHRONOLOGY);
+
+  const cancellableState = stateFrom();
+  const cancellableAllocation = addExpense(cancellableState, 'cancelled-error', 500);
+  const cancellable = await makeClaim(cancellableState, [{allocationId:cancellableAllocation, amountCents:500}]);
+  await cancelClaim(cancellableState, {claimId:cancellable.id, reason:'Created in error', expectedRevision:cancellableState.stateRevision}, async () => {}, options(later));
+  const cancelledDraft = {expectedRevision:cancellableState.stateRevision, claimId:cancellable.id, payerLabel:'No', dueDate:null, note:null};
+  await rejectsCode(updateClaimMetadata(cancellableState, cancelledDraft, async () => {}, options(later)), REIMBURSEMENT_ERROR_CODES.CLAIM_CANCELLED);
+});
+
+test('encrypted persistence failure rolls back service state and leaves the prior active vault unlockable', async () => {
+  installBrowserGlobals();
+  const seed = stateFrom();
+  const allocationId = addExpense(seed, 'encrypted-rollback', 500);
+  const stateService = createStateService({repository:createVaultRepository(), seed});
+  const passphrase = 'encrypted reimbursement rollback acceptance';
+  const created = await stateService.create(passphrase, seed);
+  const state = created.state;
+  const beforeState = structuredClone(state);
+  const beforeVault = localStorage.getItem(V2_VAULT_KEY);
+  const originalSetItem = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (key, value) => {
+    if (key !== V2_TEMP_VAULT_KEY) return originalSetItem(key, value);
+    const temporary = JSON.parse(value);
+    temporary.cipher.ciphertext = `${temporary.cipher.ciphertext.slice(0, -4)}AAAA`;
+    return originalSetItem(key, JSON.stringify(temporary));
+  };
+  const draft = createClaimDraft(state, {payerLabel:'Payer', allocationIds:[allocationId]});
+  const persist = async () => stateService.save(state, created.key, created.meta);
+
+  let mapped;
+  try {
+    await createClaim(state, draft, persist, options());
+  } catch (error) {
+    mapped = error;
+  }
+  assert.equal(mapped?.code, REIMBURSEMENT_ERROR_CODES.PERSISTENCE_FAILED);
+  assert.equal(Object.hasOwn(mapped, 'cause'), false);
+  assert.deepEqual(state, beforeState);
+  assert.equal(localStorage.getItem(V2_VAULT_KEY), beforeVault);
+
+  localStorage.setItem = originalSetItem;
+  localStorage.removeItem(V2_TEMP_VAULT_KEY);
+  const recovered = await stateService.unlock(passphrase);
+  assert.deepEqual(recovered.state, beforeState);
+});
+
+test('every acceptance-matrix mutation survives an immediate encrypted reload with exact canonical and compatibility state', async () => {
+  installBrowserGlobals();
+  const seed = stateFrom('ambiguousMulti');
+  const allocationA = addExpense(seed, 'matrix-a', 1000);
+  const allocationB = addExpense(seed, 'matrix-b', 400);
+  const allocationC = addExpense(seed, 'matrix-c', 300);
+  const allocationD = addExpense(seed, 'matrix-d', 200);
+  const inflowPartial = addInflow(seed, 'matrix-partial', 100);
+  const inflowSplit = addInflow(seed, 'matrix-split', 600);
+  const stateService = createStateService({repository:createVaultRepository(), seed});
+  const passphrase = 'phase 3b immediate encrypted reload matrix';
+  const created = await stateService.create(passphrase, seed);
+  let state = created.state;
+  let key = created.key;
+  let meta = created.meta;
+
+  async function mutateAndReload(label, mutation) {
+    const priorRevision = state.stateRevision;
+    let saves = 0;
+    const persist = async () => {
+      saves += 1;
+      meta = (await stateService.save(state, key, meta)).meta;
+    };
+    await mutation(persist);
+    assert.equal(saves, 1, `${label}: persistence count`);
+    assert.equal(state.stateRevision, priorRevision + 1, `${label}: revision increment`);
+    const expected = structuredClone(state);
+    const unlocked = await stateService.unlock(passphrase);
+    assert.deepEqual(unlocked.state, expected, `${label}: complete state`);
+    assert.equal(unlocked.state.legacyFoundation.unresolvedReimbursementClaims.length, 1, `${label}: compatibility evidence`);
+    assert.equal(validateDomainStore(unlocked.state.domain).ok, true, `${label}: domain validity`);
+    state = unlocked.state;
+    key = unlocked.key;
+    meta = unlocked.meta;
+  }
+
+  let claimAId;
+  let claimBId;
+  let claimCId;
+  let claimDId;
+  let splitLinkForA;
+  let reversibleWriteOffId;
+
+  await mutateAndReload('claim creation', async persist => {
+    const claim = await createClaim(state, createClaimDraft(state, {payerLabel:'Payer A', rows:[{allocationId:allocationA, amountCents:500}]}), persist, options());
+    claimAId = claim.id;
+  });
+  await mutateAndReload('metadata edit', async persist => {
+    const draft = createClaimMetadataDraft(state, claimAId);
+    draft.dueDate = '2026-08-31';
+    draft.note = 'Synthetic matrix note';
+    await updateClaimMetadata(state, draft, persist, options(later));
+  });
+  await mutateAndReload('amount increase', async persist => {
+    const draft = createClaimAmountsDraft(state, claimAId);
+    draft.rows[0].amountCents = 700;
+    await updateClaimAmounts(state, draft, persist, options(later));
+  });
+  await mutateAndReload('amount decrease', async persist => {
+    const draft = createClaimAmountsDraft(state, claimAId);
+    draft.rows[0].amountCents = 550;
+    await updateClaimAmounts(state, draft, persist, options(later));
+  });
+  await mutateAndReload('second claim creation', async persist => {
+    const claim = await createClaim(state, createClaimDraft(state, {payerLabel:'Payer B', allocationIds:[allocationB]}), persist, options(later));
+    claimBId = claim.id;
+  });
+  await mutateAndReload('partial payment', async persist => {
+    await applyPaymentDistribution(state, createPaymentDistributionDraft(state, inflowPartial, {rows:[{claimId:claimAId, amountCents:100}]}), persist, options(later));
+    assert.equal(projectClaim(state, claimAId).status, 'partially_paid');
+  });
+  await mutateAndReload('one inflow split and full settlement', async persist => {
+    const result = await applyPaymentDistribution(state, createPaymentDistributionDraft(state, inflowSplit, {rows:[
+      {claimId:claimAId, amountCents:200},
+      {claimId:claimBId, amountCents:400}
+    ]}), persist, options(later));
+    splitLinkForA = result.links.find(link => link.claimId === claimAId).id;
+    assert.equal(projectClaim(state, claimBId).status, 'settled');
+  });
+  await mutateAndReload('payment void', async persist => {
+    await voidPaymentLink(state, {paymentLinkId:splitLinkForA, reason:'Synthetic correction', expectedRevision:state.stateRevision}, persist, options('2026-08-02T12:00:00.000Z'));
+    assert.equal(projectInflowAvailability(state, inflowSplit).availableAmountCents, 200);
+  });
+  await mutateAndReload('partial write-off', async persist => {
+    await createWriteOff(state, createWriteOffDraft(state, claimAId, {amountCents:50, reason:'Synthetic partial write-off', effectiveAt:'2026-08-03T12:00:00.000Z'}), persist, options('2026-08-03T12:00:00.000Z'));
+    reversibleWriteOffId = state.domain.reimbursementAdjustments.at(-1).id;
+  });
+  await mutateAndReload('write-off reversal', async persist => {
+    await reverseWriteOff(state, {adjustmentId:reversibleWriteOffId, reason:'Synthetic reversal', effectiveAt:'2026-08-04T12:00:00.000Z', expectedRevision:state.stateRevision}, persist, options('2026-08-04T12:00:00.000Z'));
+    assert.equal(projectClaim(state, claimAId).writtenOffAmountCents, 0);
+  });
+  await mutateAndReload('third claim creation', async persist => {
+    const claim = await createClaim(state, createClaimDraft(state, {payerLabel:'Payer C', allocationIds:[allocationC]}), persist, options('2026-08-05T12:00:00.000Z'));
+    claimCId = claim.id;
+  });
+  await mutateAndReload('full write-off', async persist => {
+    await createWriteOff(state, createWriteOffDraft(state, claimCId, {reason:'Synthetic full write-off', effectiveAt:'2026-08-06T12:00:00.000Z'}), persist, options('2026-08-06T12:00:00.000Z'));
+    assert.equal(projectClaim(state, claimCId).status, 'written_off');
+  });
+  await mutateAndReload('fourth claim creation', async persist => {
+    const claim = await createClaim(state, createClaimDraft(state, {payerLabel:'Payer D', allocationIds:[allocationD]}), persist, options('2026-08-07T12:00:00.000Z'));
+    claimDId = claim.id;
+  });
+  await mutateAndReload('cancellation', async persist => {
+    await cancelClaim(state, {claimId:claimDId, reason:'Synthetic cancellation', expectedRevision:state.stateRevision}, persist, options('2026-08-08T12:00:00.000Z'));
+    assert.equal(projectClaim(state, claimDId).status, 'cancelled');
+  });
+  await mutateAndReload('manual repayment', async persist => {
+    await recordManualRepayment(state, createManualRepaymentDraft(state, claimAId, {amountCents:100, date:'2026-08-09', accountId:UNKNOWN_ACCOUNT_ID}), persist, options('2026-08-09T12:00:00.000Z'));
+    const manual = state.domain.transactions.at(-1);
+    assert.equal(manual.movementType, 'reimbursement');
+    assert.equal(manual.locationRegion, null);
+    assert.equal(manual.locationCountry, null);
+  });
+});
+
+test('state revision and reimbursement facts survive encrypted backup and restore without an extra increment', async () => {
+  installBrowserGlobals();
+  const seed = stateFrom();
+  const firstAllocation = addExpense(seed, 'backup-first', 500);
+  const secondAllocation = addExpense(seed, 'backup-second', 500);
+  const stateService = createStateService({repository:createVaultRepository(), seed});
+  const passphrase = 'phase 3b revision backup restore';
+  const created = await stateService.create(passphrase, seed);
+  const state = created.state;
+  let meta = created.meta;
+  const persist = async () => { meta = (await stateService.save(state, created.key, meta)).meta; };
+
+  const first = await createClaim(state, createClaimDraft(state, {payerLabel:'Backup payer', allocationIds:[firstAllocation]}), persist, options());
+  const backupState = structuredClone(state);
+  const encryptedBackup = stateService.exportEncryptedBackup();
+  await createClaim(state, createClaimDraft(state, {payerLabel:'Later payer', allocationIds:[secondAllocation]}), persist, options(later));
+  assert.equal(state.stateRevision, backupState.stateRevision + 1);
+
+  const restored = await stateService.restore(encryptedBackup, passphrase);
+  assert.equal(restored.state.stateRevision, backupState.stateRevision);
+  assert.deepEqual(restored.state, backupState);
+  assert.equal(projectClaim(restored.state, first.id).status, 'open');
+  const unlocked = await stateService.unlock(passphrase);
+  assert.deepEqual(unlocked.state, backupState);
 });

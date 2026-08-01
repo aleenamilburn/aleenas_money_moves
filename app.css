@@ -39,6 +39,7 @@ nav{display:grid;gap:6px}
 .topbar{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:26px}
 .top-actions{display:flex;gap:10px;align-items:flex-end}.month-control{min-width:190px}
 .screen{display:none;animation:fade .2s ease}.screen.active{display:block}
+.vault-conflict{display:flex;align-items:center;justify-content:space-between;gap:16px;border:1px solid #755d26;background:#1b1609;border-radius:16px;padding:14px 16px;margin-bottom:18px}.vault-conflict p{margin:0;color:var(--amber)}.vault-conflict div{display:flex;gap:8px;flex-wrap:wrap}
 @keyframes fade{from{opacity:.45;transform:translateY(4px)}to{opacity:1;transform:none}}
 .metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:18px}
 .metric-card,.panel{background:linear-gradient(180deg,rgba(13,28,20,.98),rgba(8,19,13,.98));border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}

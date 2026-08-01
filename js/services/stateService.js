@@ -26,39 +26,53 @@ export function createStateService({repository, seed, migrate = migrateState} = 
     readLegacyState() {
       return repository.readLegacyState();
     },
-    async create(passphrase, initialState = seed) {
+    async create(passphrase, initialState = seed, options = {}) {
       const migration = migrateForUse(initialState);
-      const created = await repository.create(migration.state, passphrase);
+      const created = await repository.create(migration.state, passphrase, options.coordination);
       return {...created, state:migration.state, migration};
     },
     async unlock(passphrase) {
       const unlocked = await repository.unlock(passphrase);
       const migration = migrateForUse(unlocked.state);
       let meta = unlocked.meta;
+      let vaultGeneration = unlocked.vaultGeneration;
       if (unlocked.needsVaultMigration || migration.changed || !sameState(unlocked.state, migration.state)) {
-        meta = await repository.save(migration.state, unlocked.key, unlocked.meta);
+        const saved = await repository.save(migration.state, unlocked.key, unlocked.meta, {
+          expectedVaultGeneration:unlocked.vaultGeneration,
+          ...unlocked.coordination
+        });
+        meta = saved.meta;
+        vaultGeneration = saved.vaultGeneration;
       }
-      return {...unlocked, state:migration.state, meta, migration};
+      return {...unlocked, state:migration.state, meta, vaultGeneration, migration};
     },
-    async save(state, key, meta) {
+    async save(state, key, meta, {expectedVaultGeneration = meta?.vaultGeneration, coordination} = {}) {
       const migration = migrateForUse(state);
-      const savedMeta = await repository.save(migration.state, key, meta);
-      return {meta:savedMeta, state:migration.state, migration};
+      const saved = await repository.save(migration.state, key, meta, {expectedVaultGeneration, ...coordination});
+      return {...saved, state:migration.state, migration};
     },
-    async changePassphrase(state, currentPassphrase, nextPassphrase) {
+    async changePassphrase(state, currentPassphrase, nextPassphrase, {expectedVaultGeneration, coordination} = {}) {
       const migration = migrateForUse(state);
-      const changed = await repository.changePassphrase(migration.state, currentPassphrase, nextPassphrase);
+      const expected = expectedVaultGeneration ?? await repository.readVaultGeneration();
+      const changed = await repository.changePassphrase(migration.state, currentPassphrase, nextPassphrase, {
+        expectedVaultGeneration:expected,
+        ...coordination
+      });
       return {...changed, state:migration.state, migration};
     },
     exportEncryptedBackup() {
       return repository.exportEncryptedBackup();
     },
-    async restore(raw, passphrase) {
+    async restore(raw, passphrase, {expectedVaultGeneration, coordination} = {}) {
+      const expected = expectedVaultGeneration ?? await repository.readVaultGeneration();
       const verified = await repository.verifyBackup(raw, passphrase);
       const migration = migrateForUse(verified.state);
       // save() writes the V2 vault only after decryption and migration validation have both succeeded.
-      const meta = await repository.save(migration.state, verified.key, verified.meta);
-      return {...verified, state:migration.state, meta, migration};
+      const saved = await repository.save(migration.state, verified.key, verified.meta, {
+        expectedVaultGeneration:expected,
+        ...coordination
+      });
+      return {...verified, ...saved, state:migration.state, migration};
     },
     clearCurrentVault() {
       return repository.clearCurrentVault();

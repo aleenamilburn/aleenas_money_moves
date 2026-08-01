@@ -5,6 +5,7 @@ export const UNKNOWN_ACCOUNT_ID = 'unknown-account';
 
 export const V2_VAULT_KEY = 'money-moves-vault-v2';
 export const V2_TEMP_VAULT_KEY = 'money-moves-vault-v2-temp';
+export const V2_VAULT_WRITE_LEASE_KEY = 'money-moves-vault-v2-write-lease';
 export const V1_VAULT_KEY = 'verdant-vault-v1';
 export const V1_TEMP_VAULT_KEY = 'verdant-vault-v1-temp';
 export const V1_LEGACY_STATE_KEY = 'verdant-console-v2';
