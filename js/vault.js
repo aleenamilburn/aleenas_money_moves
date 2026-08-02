@@ -7,6 +7,7 @@ import {
   V2_TEMP_VAULT_KEY,
   V2_VAULT_AAD,
   V2_VAULT_KEY,
+  V2_VAULT_PLATFORM_LOCK_NAME,
   V2_VAULT_WRITE_LEASE_KEY
 } from './domain/constants.js';
 
@@ -31,6 +32,15 @@ export class VaultGenerationError extends Error {
     super('Vault generation metadata is invalid.');
     this.name = 'VaultGenerationError';
     this.code = 'INVALID_VAULT_GENERATION';
+  }
+}
+
+export class VaultPersistenceError extends Error {
+  constructor(operation = 'save') {
+    super('The encrypted Money Moves vault could not be saved.');
+    this.name = 'VaultPersistenceError';
+    this.code = 'VAULT_PERSISTENCE_FAILED';
+    this.operation = operation;
   }
 }
 
@@ -248,12 +258,42 @@ async function assertExpectedGeneration(expectedVaultGeneration, operation, owne
   if (current !== expectedVaultGeneration) throw new VaultConflictError(operation);
 }
 
-async function writeCoordinated(vault,key,{expectedVaultGeneration, operation = 'save', ...options} = {}) {
+function writerLockManager(options = {}) {
+  if (Object.prototype.hasOwnProperty.call(options, 'platformLockManager')) return options.platformLockManager;
+  return globalThis.navigator?.locks || null;
+}
+
+async function withPlatformWriterLock(operation, options, action) {
+  const manager = writerLockManager(options);
+  const requirePlatformLock = options.requirePlatformLock ?? typeof globalThis.document !== 'undefined';
+  if (!manager || typeof manager.request !== 'function') {
+    if (requirePlatformLock) throw new VaultConflictError(operation);
+    return action();
+  }
+  let entered = false;
+  try {
+    return await manager.request(V2_VAULT_PLATFORM_LOCK_NAME, {mode:'exclusive'}, async lock => {
+      entered = true;
+      if (!lock) throw new VaultConflictError(operation);
+      if (typeof options.afterPlatformLockAcquired === 'function') await options.afterPlatformLockAcquired();
+      return action();
+    });
+  } catch (error) {
+    if (entered) throw error;
+    throw new VaultConflictError(operation);
+  }
+}
+
+async function writeWithLease(vault,key,{expectedVaultGeneration, operation = 'save', ...options} = {}) {
   assertVaultGeneration(expectedVaultGeneration);
+  if (typeof options.beforeLeaseAcquisition === 'function') await options.beforeLeaseAcquisition();
   const ownerToken = acquireWriteLease(operation, options);
   let preserveVerifiedTemporary = false;
   try {
+    if (typeof options.afterLeaseAcquisition === 'function') await options.afterLeaseAcquisition();
+    if (typeof options.beforeInitialGenerationCheck === 'function') await options.beforeInitialGenerationCheck();
     await assertExpectedGeneration(expectedVaultGeneration, operation, ownerToken);
+    if (typeof options.afterInitialGenerationCheck === 'function') await options.afterInitialGenerationCheck();
     if (typeof options.beforeTemporaryWrite === 'function') await options.beforeTemporaryWrite();
     const vaultGeneration = createGeneration(options);
     const pendingWrite = {version:1, ownerToken, previousVaultGeneration:expectedVaultGeneration};
@@ -262,14 +302,21 @@ async function writeCoordinated(vault,key,{expectedVaultGeneration, operation = 
     if (typeof options.afterTemporaryWrite === 'function') await options.afterTemporaryWrite();
     const storedTemporary = JSON.parse(localStorage.getItem(V2_TEMP_VAULT_KEY));
     await decryptState(storedTemporary, key);
+    if (typeof options.afterTemporaryVerification === 'function') await options.afterTemporaryVerification();
     renewWriteLease(ownerToken, operation, options);
     if (typeof options.beforePromotion === 'function') await options.beforePromotion();
+    if (!readLeaseOwnedBy(ownerToken, options)) throw new VaultConflictError(operation);
+    if (typeof options.beforeFinalGenerationCheck === 'function') await options.beforeFinalGenerationCheck();
+    await assertExpectedGeneration(expectedVaultGeneration, operation, ownerToken);
+    if (typeof options.afterFinalGenerationCheck === 'function') await options.afterFinalGenerationCheck();
     if (!readLeaseOwnedBy(ownerToken, options)) throw new VaultConflictError(operation);
     await assertExpectedGeneration(expectedVaultGeneration, operation, ownerToken);
     const activeVault = {...storedTemporary};
     delete activeVault.pendingWrite;
     preserveVerifiedTemporary = true;
     localStorage.setItem(V2_VAULT_KEY, JSON.stringify(activeVault));
+    if (typeof options.afterActivePromotion === 'function') await options.afterActivePromotion();
+    if (typeof options.beforeTemporaryCleanup === 'function') await options.beforeTemporaryCleanup();
     preserveVerifiedTemporary = false;
     localStorage.removeItem(V2_TEMP_VAULT_KEY);
     return {meta:metaFromVault(activeVault), vaultGeneration};
@@ -278,6 +325,20 @@ async function writeCoordinated(vault,key,{expectedVaultGeneration, operation = 
     throw error;
   } finally {
     releaseWriteLease(ownerToken);
+  }
+}
+
+async function writeCoordinated(vault,key,{expectedVaultGeneration, operation = 'save', ...options} = {}) {
+  assertVaultGeneration(expectedVaultGeneration);
+  try {
+    return await withPlatformWriterLock(operation, options, () => writeWithLease(vault, key, {
+      ...options,
+      expectedVaultGeneration,
+      operation
+    }));
+  } catch (error) {
+    if (error instanceof VaultConflictError || error instanceof VaultGenerationError || error instanceof VaultPersistenceError) throw error;
+    throw new VaultPersistenceError(operation);
   }
 }
 
@@ -376,5 +437,6 @@ export const vaultConstants={
   LEGACY_STATE_KEY:V1_LEGACY_STATE_KEY,
   KDF_ITERATIONS,
   WRITE_LEASE_MS,
-  NO_VAULT_GENERATION
+  NO_VAULT_GENERATION,
+  PLATFORM_LOCK_NAME:V2_VAULT_PLATFORM_LOCK_NAME
 };

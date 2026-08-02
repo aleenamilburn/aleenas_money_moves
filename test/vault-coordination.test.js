@@ -145,6 +145,119 @@ test('two writers reject stale save, preserve active ciphertext and generation, 
   assert.equal((await stateService.unlock(passphrase)).state.preferences.writer, 'B');
 });
 
+test('the origin-wide writer lock allows exactly one winner in 100 concurrent same-generation races', async () => {
+  const stateService = service();
+  const created = await stateService.create(passphrase, schema7ClaimedState());
+  let canonical = created.state;
+  let generation = created.vaultGeneration;
+  let meta = created.meta;
+  let successes = 0;
+  let conflicts = 0;
+  let otherFailures = 0;
+
+  for (let index = 0; index < 100; index += 1) {
+    const stateA = clone(canonical);
+    const stateB = clone(canonical);
+    stateA.preferences.stressWriter = `A-${index}`;
+    stateB.preferences.stressWriter = `B-${index}`;
+    advanceStateRevision(stateA);
+    advanceStateRevision(stateB);
+
+    let markAcquired;
+    let releaseWinner;
+    const acquired = new Promise(resolve => { markAcquired = resolve; });
+    const holdWinner = new Promise(resolve => { releaseWinner = resolve; });
+    const writerA = stateService.save(stateA, created.key, meta, {
+      expectedVaultGeneration:generation,
+      coordination:{afterPlatformLockAcquired:async () => {
+        markAcquired();
+        await holdWinner;
+      }}
+    });
+    await acquired;
+    const writerB = stateService.save(stateB, created.key, meta, {expectedVaultGeneration:generation});
+    releaseWinner();
+    const results = await Promise.allSettled([writerA, writerB]);
+    const fulfilled = results.filter(result => result.status === 'fulfilled');
+    const rejected = results.filter(result => result.status === 'rejected');
+    assert.equal(fulfilled.length, 1, `race ${index} winner count`);
+    assert.equal(rejected.length, 1, `race ${index} rejection count`);
+    assert.equal(rejected[0].reason?.code, 'VAULT_CONFLICT', `race ${index} rejection code`);
+    successes += fulfilled.length;
+    conflicts += rejected.filter(result => result.reason?.code === 'VAULT_CONFLICT').length;
+    otherFailures += rejected.filter(result => result.reason?.code !== 'VAULT_CONFLICT').length;
+    canonical = fulfilled[0].value.state;
+    generation = fulfilled[0].value.vaultGeneration;
+    meta = fulfilled[0].value.meta;
+  }
+
+  assert.equal(successes, 100);
+  assert.equal(conflicts, 100);
+  assert.equal(otherFailures, 0);
+  assert.equal(navigator.locks.maxActive, 1);
+  assert.equal(canonical.stateRevision, created.state.stateRevision + 100);
+  const authoritative = await stateService.unlock(passphrase);
+  assert.deepEqual(authoritative.state, canonical);
+  assert.equal(authoritative.vaultGeneration, generation);
+});
+
+test('production-required platform locking fails closed and hides lock-manager acquisition errors', async () => {
+  const stateService = service();
+  const created = await stateService.create(passphrase, schema7ClaimedState());
+  const active = localStorage.getItem(V2_VAULT_KEY);
+  const changed = clone(created.state);
+  changed.preferences.platformLockRequired = true;
+  advanceStateRevision(changed);
+
+  await expectConflict(() => stateService.save(changed, created.key, created.meta, {
+    expectedVaultGeneration:created.vaultGeneration,
+    coordination:{platformLockManager:null, requirePlatformLock:true}
+  }));
+  assert.equal(localStorage.getItem(V2_VAULT_KEY), active);
+
+  const rawMessage = 'synthetic platform internals must stay private';
+  let conflict;
+  try {
+    await stateService.save(changed, created.key, created.meta, {
+      expectedVaultGeneration:created.vaultGeneration,
+      coordination:{platformLockManager:{request:async () => { throw new Error(rawMessage); }}, requirePlatformLock:true}
+    });
+  } catch (error) {
+    conflict = error;
+  }
+  assert.equal(conflict?.code, 'VAULT_CONFLICT');
+  assert.equal(conflict?.message.includes(rawMessage), false);
+  assert.equal(conflict?.cause, undefined);
+  assert.equal(localStorage.getItem(V2_VAULT_KEY), active);
+});
+
+test('raw storage failures are converted to a stable private persistence error', async () => {
+  const stateService = service();
+  const created = await stateService.create(passphrase, schema7ClaimedState());
+  const active = localStorage.getItem(V2_VAULT_KEY);
+  const changed = clone(created.state);
+  changed.preferences.storageFailure = true;
+  advanceStateRevision(changed);
+  const setItem = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (key, value) => {
+    if (key === V2_TEMP_VAULT_KEY) throw new Error('raw quota and storage internals');
+    return setItem(key, value);
+  };
+  let failure;
+  try {
+    await stateService.save(changed, created.key, created.meta, {expectedVaultGeneration:created.vaultGeneration});
+  } catch (error) {
+    failure = error;
+  } finally {
+    localStorage.setItem = setItem;
+  }
+  assert.equal(failure?.code, 'VAULT_PERSISTENCE_FAILED');
+  assert.equal(failure?.message.includes('raw quota'), false);
+  assert.equal(failure?.cause, undefined);
+  assert.equal(localStorage.getItem(V2_VAULT_KEY), active);
+  assert.equal(await readVaultGeneration(), created.vaultGeneration);
+});
+
 test('three writers serialize one commit and repeated stale retries never advance generation', async () => {
   const stateService = service();
   await stateService.create(passphrase, schema7ClaimedState());
@@ -225,6 +338,7 @@ test('lock owner mismatch and owner-token collision fail closed without changing
   }));
   assert.equal(localStorage.getItem(V2_VAULT_KEY), active);
   assert.equal(localStorage.getItem(V2_TEMP_VAULT_KEY), null);
+  assert.equal(JSON.parse(localStorage.getItem(V2_VAULT_WRITE_LEASE_KEY)).ownerToken, 'different-owner');
 
   localStorage.setItem(V2_VAULT_WRITE_LEASE_KEY, JSON.stringify({version:1, ownerToken:'collision-token', expiresAt:Date.now()+60000}));
   await expectConflict(() => stateService.save(changed, created.key, created.meta, {
@@ -232,6 +346,59 @@ test('lock owner mismatch and owner-token collision fail closed without changing
     coordination:{ownerToken:'collision-token'}
   }));
   assert.equal(localStorage.getItem(V2_VAULT_KEY), active);
+});
+
+test('deleted or replaced lease ownership after temporary verification blocks promotion', async () => {
+  for (const mode of ['deleted', 'replaced']) {
+    installBrowserGlobals();
+    const stateService = service();
+    const created = await stateService.create(passphrase, schema7ClaimedState());
+    const active = localStorage.getItem(V2_VAULT_KEY);
+    const changed = clone(created.state);
+    changed.preferences.leaseInterference = mode;
+    advanceStateRevision(changed);
+    await expectConflict(() => stateService.save(changed, created.key, created.meta, {
+      expectedVaultGeneration:created.vaultGeneration,
+      coordination:{afterTemporaryVerification:async () => {
+        if (mode === 'deleted') localStorage.removeItem(V2_VAULT_WRITE_LEASE_KEY);
+        else localStorage.setItem(V2_VAULT_WRITE_LEASE_KEY, JSON.stringify({
+          version:1,
+          ownerToken:'replacement-owner',
+          expiresAt:Date.now()+60000
+        }));
+      }}
+    }));
+    assert.equal(localStorage.getItem(V2_VAULT_KEY), active);
+    assert.equal(localStorage.getItem(V2_TEMP_VAULT_KEY), null);
+  }
+});
+
+test('a crash after active promotion leaves one coherent authoritative generation and recoverable temp evidence', async () => {
+  const stateService = service();
+  const created = await stateService.create(passphrase, schema7ClaimedState());
+  const changed = clone(created.state);
+  changed.preferences.crashAfterPromotion = true;
+  advanceStateRevision(changed);
+  await assert.rejects(() => stateService.save(changed, created.key, created.meta, {
+    expectedVaultGeneration:created.vaultGeneration,
+    coordination:{afterActivePromotion:async () => { throw new Error('synthetic process termination'); }}
+  }));
+  const active = JSON.parse(localStorage.getItem(V2_VAULT_KEY));
+  const temporary = JSON.parse(localStorage.getItem(V2_TEMP_VAULT_KEY));
+  assert.equal(active.vaultGeneration, temporary.vaultGeneration);
+  assert.equal(active.pendingWrite, undefined);
+  assert.equal(temporary.pendingWrite.previousVaultGeneration, created.vaultGeneration);
+  assert.equal(localStorage.getItem(V2_VAULT_WRITE_LEASE_KEY), null);
+  const recovered = await stateService.unlock(passphrase);
+  assert.equal(recovered.state.preferences.crashAfterPromotion, true);
+  assert.equal(recovered.vaultGeneration, active.vaultGeneration);
+  recovered.state.preferences.afterCrashRecovery = true;
+  advanceStateRevision(recovered.state);
+  const saved = await stateService.save(recovered.state, recovered.key, recovered.meta, {
+    expectedVaultGeneration:recovered.vaultGeneration
+  });
+  assert.notEqual(saved.vaultGeneration, recovered.vaultGeneration);
+  assert.equal(localStorage.getItem(V2_TEMP_VAULT_KEY), null);
 });
 
 test('an expired lease during encryption cannot be renewed or promoted', async () => {

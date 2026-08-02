@@ -122,7 +122,10 @@ async function applyCanonicalChange(change) {
 }
 
 function showVaultConflict() {
-  $('vaultConflictBanner').classList.remove('hidden');
+  const banner=$('vaultConflictBanner');
+  const newlyVisible=banner.classList.contains('hidden');
+  banner.classList.remove('hidden');
+  if (newlyVisible) banner.focus({preventScroll:true});
 }
 
 function hideVaultConflict() {

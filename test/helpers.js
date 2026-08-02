@@ -16,11 +16,41 @@ export class MemoryStorage {
   }
 }
 
+export class MemoryLockManager {
+  #tails = new Map();
+  active = 0;
+  maxActive = 0;
+
+  async request(name, options, callback) {
+    if (options?.mode !== 'exclusive') throw new Error('Only exclusive test locks are supported.');
+    const previous = this.#tails.get(name) || Promise.resolve();
+    let release;
+    const current = new Promise(resolve => { release = resolve; });
+    const tail = previous.then(() => current);
+    this.#tails.set(name, tail);
+    await previous;
+    this.active += 1;
+    this.maxActive = Math.max(this.maxActive, this.active);
+    try {
+      return await callback({name, mode:'exclusive'});
+    } finally {
+      this.active -= 1;
+      release();
+      if (this.#tails.get(name) === tail) this.#tails.delete(name);
+    }
+  }
+}
+
 export function installBrowserGlobals() {
   if (!globalThis.crypto) globalThis.crypto = webcrypto;
   if (!globalThis.btoa) globalThis.btoa = value => Buffer.from(value, 'binary').toString('base64');
   if (!globalThis.atob) globalThis.atob = value => Buffer.from(value, 'base64').toString('binary');
   globalThis.localStorage = new MemoryStorage();
+  const locks = new MemoryLockManager();
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable:true,
+    value:{locks}
+  });
   return globalThis.localStorage;
 }
 

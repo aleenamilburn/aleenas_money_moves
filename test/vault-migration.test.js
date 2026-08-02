@@ -150,7 +150,8 @@ test('an interrupted V1-to-V2 write resumes from the verified V2 temporary recor
     return originalSetItem(key, value);
   };
 
-  await assert.rejects(() => service().unlock(passphrase), /simulated interrupted write/);
+  await assert.rejects(() => service().unlock(passphrase), error =>
+    error?.code === 'VAULT_PERSISTENCE_FAILED' && !error.message.includes('simulated interrupted write'));
   assert.equal(localStorage.getItem(V2_VAULT_KEY), null);
   assert.ok(localStorage.getItem(V2_TEMP_VAULT_KEY));
   assert.equal(localStorage.getItem(V1_VAULT_KEY), legacyRaw);
@@ -250,7 +251,8 @@ test('an interrupted schema-6-to-7 vault write preserves the active schema-6 vau
     return originalSetItem(key, value);
   };
 
-  await assert.rejects(() => service().unlock(passphrase), /synthetic schema-7 persistence interruption/);
+  await assert.rejects(() => service().unlock(passphrase), error =>
+    error?.code === 'VAULT_PERSISTENCE_FAILED' && !error.message.includes('synthetic schema-7 persistence interruption'));
   assert.equal(localStorage.getItem(V2_VAULT_KEY), schema6Raw);
   assert.ok(localStorage.getItem(V2_TEMP_VAULT_KEY));
 
