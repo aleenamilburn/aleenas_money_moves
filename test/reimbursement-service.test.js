@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {migrateState} from '../js/domain/migrations.js';
-import {UNKNOWN_ACCOUNT_ID, V2_TEMP_VAULT_KEY, V2_VAULT_KEY} from '../js/domain/constants.js';
+import {UNKNOWN_ACCOUNT_ID} from '../js/domain/constants.js';
 import {validateDomainStore} from '../js/domain/models.js';
 import {createStateService} from '../js/services/stateService.js';
 import {createVaultRepository} from '../js/services/vaultRepository.js';
@@ -35,7 +35,8 @@ import {
   voidPaymentLink
 } from '../js/services/reimbursementService.js';
 import {schema6ReimbursementFixtures as fixtures} from './fixtures/schema6-reimbursements.js';
-import {installBrowserGlobals} from './helpers.js';
+import {currentFakeVaultsTable, installBrowserGlobals, TEST_USER_ID} from './helpers.js';
+import {setSupabaseClientForTests} from '../js/services/supabaseClient.js';
 
 const now = '2026-07-31T12:00:00.000Z';
 const later = '2026-08-01T12:00:00.000Z';
@@ -713,14 +714,15 @@ test('encrypted persistence failure rolls back service state and leaves the prio
   const created = await stateService.create(passphrase, seed);
   const state = created.state;
   const beforeState = structuredClone(state);
-  const beforeVault = localStorage.getItem(V2_VAULT_KEY);
-  const originalSetItem = localStorage.setItem.bind(localStorage);
-  localStorage.setItem = (key, value) => {
-    if (key !== V2_TEMP_VAULT_KEY) return originalSetItem(key, value);
-    const temporary = JSON.parse(value);
-    temporary.cipher.ciphertext = `${temporary.cipher.ciphertext.slice(0, -4)}AAAA`;
-    return originalSetItem(key, JSON.stringify(temporary));
-  };
+  const table = currentFakeVaultsTable();
+  const beforeRow = structuredClone(table.rows.get(TEST_USER_ID));
+
+  // 'before-apply' simulates a write that never reached the server: the table stays
+  // untouched, so this is a genuine persistence failure, not the ambiguous-but-
+  // actually-committed case (that path is covered separately and resolves to
+  // success, by design -- see test/hosted-vault-storage.test.js).
+  setSupabaseClientForTests(table.client(TEST_USER_ID, {failMode:'before-apply'}));
+
   const draft = createClaimDraft(state, {payerLabel:'Payer', allocationIds:[allocationId]});
   const persist = async () => stateService.save(state, created.key, created.meta);
 
@@ -733,10 +735,9 @@ test('encrypted persistence failure rolls back service state and leaves the prio
   assert.equal(mapped?.code, REIMBURSEMENT_ERROR_CODES.PERSISTENCE_FAILED);
   assert.equal(Object.hasOwn(mapped, 'cause'), false);
   assert.deepEqual(state, beforeState);
-  assert.equal(localStorage.getItem(V2_VAULT_KEY), beforeVault);
+  assert.deepEqual(table.rows.get(TEST_USER_ID), beforeRow);
 
-  localStorage.setItem = originalSetItem;
-  localStorage.removeItem(V2_TEMP_VAULT_KEY);
+  setSupabaseClientForTests(table.client(TEST_USER_ID));
   const recovered = await stateService.unlock(passphrase);
   assert.deepEqual(recovered.state, beforeState);
 });
@@ -871,7 +872,7 @@ test('state revision and reimbursement facts survive encrypted backup and restor
 
   const first = await createClaim(state, createClaimDraft(state, {payerLabel:'Backup payer', allocationIds:[firstAllocation]}), persist, options());
   const backupState = structuredClone(state);
-  const encryptedBackup = stateService.exportEncryptedBackup();
+  const encryptedBackup = await stateService.exportEncryptedBackup();
   await createClaim(state, createClaimDraft(state, {payerLabel:'Later payer', allocationIds:[secondAllocation]}), persist, options(later));
   assert.equal(state.stateRevision, backupState.stateRevision + 1);
 

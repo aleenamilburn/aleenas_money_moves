@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.supabase.co; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'">
   <title>Money Moves</title>
   <link rel="stylesheet" href="app.css">
 </head>
@@ -12,6 +12,17 @@
   <div class="lock-layer show" id="lockLayer">
     <div class="lock-card">
       <div class="lock-mark">MM</div>
+      <section id="notConfiguredPanel" class="lock-panel hidden">
+        <p class="eyebrow">SETUP NEEDED</p>
+        <h1>Hosted storage is not configured</h1>
+        <p>This deployment is missing its Supabase configuration. See <code>docs/engineering/HOSTED_STORAGE_SETUP.md</code> for the setup steps.</p>
+      </section>
+      <section id="signinPanel" class="lock-panel hidden">
+        <p class="eyebrow">SIGN IN</p>
+        <h1>Sign in to Money Moves</h1>
+        <p>Your account signs you in to reach your encrypted vault. It does not grant access to your data — only your passphrase, entered next, can decrypt it.</p>
+        <button class="primary wide-button" id="signInGoogle">Sign in with Google</button>
+      </section>
       <section id="setupPanel" class="lock-panel hidden">
         <p class="eyebrow">FIRST LAUNCH</p>
         <h1>Create your encrypted money vault</h1>
@@ -23,7 +34,7 @@
       <section id="unlockPanel" class="lock-panel hidden">
         <p class="eyebrow">VAULT LOCKED</p>
         <h1>Welcome back</h1>
-        <p>Enter your passphrase to decrypt your local data.</p>
+        <p>Enter your passphrase to decrypt your data.</p>
         <label>Passphrase<input id="unlockPass" type="password" autocomplete="current-password"></label>
         <button class="primary wide-button" id="unlockVault">Unlock</button>
       </section>
@@ -47,7 +58,7 @@
       </nav>
       <div class="sidebar-note">
         <span class="status-dot"></span>
-        <div><strong>Local-first</strong><small>No automatic bank access in this app</small></div>
+        <div><strong>Encrypted vault</strong><small>No automatic bank access in this app</small></div>
       </div>
     </aside>
 
@@ -60,6 +71,7 @@
         <div class="top-actions">
           <label class="month-control">Month<select id="monthSelect"></select></label>
           <button id="lockNow">Lock</button>
+          <button id="signOutNow">Sign out</button>
         </div>
       </header>
 
@@ -231,14 +243,15 @@
             <button class="primary" id="settingsImport">Import CSV</button>
           </article>
           <article class="panel">
-            <p class="eyebrow">VAULT SECURITY</p><h2>Encrypted local storage</h2>
-            <p>AES-256-GCM encryption, PBKDF2-SHA-256 key derivation, and a 60-minute inactivity lock. Your passphrase is never stored.</p>
+            <p class="eyebrow">VAULT SECURITY</p><h2>Encrypted vault</h2>
+            <p>AES-256-GCM encryption, PBKDF2-SHA-256 key derivation, and a 60-minute inactivity lock. Your passphrase is never stored anywhere, on this device or off it — only you can decrypt your data.</p>
+            <p class="fine-print" id="signedInAs"></p>
             <div class="button-stack">
               <button id="changePassphrase">Change passphrase</button>
               <button id="exportBackup">Export encrypted backup</button>
               <button id="restoreBackup">Restore encrypted backup</button>
               <input class="file-input" type="file" id="restoreFile" accept=".json,application/json">
-              <button class="danger" id="resetVault">Erase local vault</button>
+              <button class="danger" id="resetVault">Sign out of this browser</button>
             </div>
           </article>
         </div>
@@ -282,6 +295,7 @@
   </div>
 
   <script src="data.js"></script>
+  <script src="js/config.js"></script>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

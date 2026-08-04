@@ -1,4 +1,9 @@
 import {webcrypto} from 'node:crypto';
+import {setSupabaseClientForTests} from '../js/services/supabaseClient.js';
+import {createFakeVaultsTable} from './hostedVaultFake.js';
+
+const DEFAULT_TEST_USER_ID = 'test-user-1';
+let activeFakeVaultsTable = null;
 
 export class MemoryStorage {
   #items = new Map();
@@ -41,7 +46,15 @@ export class MemoryLockManager {
   }
 }
 
-export function installBrowserGlobals() {
+// Every vault.js call now needs both an authenticated session (hostedVaultStorage.js
+// throws HostedVaultAuthRequiredError without one) and something to reach for the
+// vaults table -- this wires up a fresh fake table with a default signed-in user for
+// each test, so existing tests that only care about vault/migration/service behavior
+// don't each need to know about hosted storage's existence. Tests that specifically
+// exercise conflict/network-failure/cross-device behavior should call
+// currentFakeVaultsTable() to get the shared table and mint additional clients
+// against it (see test/hosted-vault-storage.test.js).
+export function installBrowserGlobals({userId = DEFAULT_TEST_USER_ID} = {}) {
   if (!globalThis.crypto) globalThis.crypto = webcrypto;
   if (!globalThis.btoa) globalThis.btoa = value => Buffer.from(value, 'binary').toString('base64');
   if (!globalThis.atob) globalThis.atob = value => Buffer.from(value, 'base64').toString('binary');
@@ -51,8 +64,17 @@ export function installBrowserGlobals() {
     configurable:true,
     value:{locks}
   });
+  activeFakeVaultsTable = createFakeVaultsTable();
+  setSupabaseClientForTests(activeFakeVaultsTable.client(userId));
   return globalThis.localStorage;
 }
+
+export function currentFakeVaultsTable() {
+  if (!activeFakeVaultsTable) throw new Error('installBrowserGlobals() must run before currentFakeVaultsTable() is used.');
+  return activeFakeVaultsTable;
+}
+
+export const TEST_USER_ID = DEFAULT_TEST_USER_ID;
 
 export function legacyV1State() {
   return {

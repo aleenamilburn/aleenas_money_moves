@@ -2,19 +2,22 @@ import * as vault from '../vault.js';
 
 export function createVaultRepository(vaultApi = vault) {
   return {
-    hasVault() {
-      return typeof vaultApi.hasVault === 'function'
-        ? vaultApi.hasVault()
-        : Boolean(vaultApi.readVaultRecord());
+    async hasVault() {
+      return vaultApi.hasVault();
     },
     readLegacyState() {
       return vaultApi.readLegacyState();
     },
+    readLocalV1Record() {
+      return vaultApi.readLocalV1Record();
+    },
     async readVaultGeneration() {
       return vaultApi.readVaultGeneration();
     },
-    isActiveVaultStorageKey(storageKey) {
-      return storageKey === vaultApi.vaultConstants?.VAULT_KEY;
+    // Same-device early warning only, replacing the native `storage` event that
+    // never fires once the vault leaves localStorage. Not authoritative.
+    subscribeToVaultChangedElsewhere(callback) {
+      return vaultApi.subscribeToVaultChangedElsewhere(callback);
     },
     async create(state, passphrase, options) {
       return vaultApi.createVault(state, passphrase, options);
@@ -28,7 +31,7 @@ export function createVaultRepository(vaultApi = vault) {
     async changePassphrase(state, currentPassphrase, nextPassphrase, options) {
       return vaultApi.changePassphrase(state, currentPassphrase, nextPassphrase, options);
     },
-    exportEncryptedBackup() {
+    async exportEncryptedBackup() {
       return vaultApi.exportEncryptedBackup();
     },
     async verifyBackup(raw, passphrase) {

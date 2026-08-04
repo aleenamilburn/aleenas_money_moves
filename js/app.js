@@ -16,6 +16,8 @@ import {
   monthSummary, debtAccounts,
   rankedDestinations, addVisited, scriptureForMonth, bucketById
 } from './state.js';
+import {isHostedStorageConfigured} from './services/supabaseClient.js';
+import {AuthServiceError, getCurrentSession, onAuthStateChange, signInWithProvider, signOut as authSignOut} from './services/authService.js';
 
 const seed = window.MONEY_MOVES_SEED;
 const $ = id => document.getElementById(id);
@@ -33,7 +35,9 @@ let saveChain = Promise.resolve();
 let inactivityTimer = null;
 let lastActivity = Date.now();
 let currentScreen = 'overview';
-let setupState = seed;
+let currentSession = null;
+let unsubscribeAuthChange = null;
+let unsubscribeVaultChangedElsewhere = null;
 let selectedBucketId = null;
 let expandedBucketIds = new Set();
 let bucketFilters = {from:'',to:'',accountId:'',reviewStatus:'',assignment:'',search:''};
@@ -60,6 +64,8 @@ function setMessage(id,message,isError=false) {
 }
 
 function showPanel(name) {
+  $('notConfiguredPanel').classList.toggle('hidden',name!=='not-configured');
+  $('signinPanel').classList.toggle('hidden',name!=='signin');
   $('setupPanel').classList.toggle('hidden',name!=='setup');
   $('unlockPanel').classList.toggle('hidden',name!=='unlock');
   $('lockLayer').classList.add('show');
@@ -74,6 +80,11 @@ function enterApp() {
   renderAll();
 }
 
+// Locks the decrypted vault back to a passphrase prompt while remaining signed in
+// to the account — distinct from signing out entirely (see signOutApp below). This
+// is the "logged in but locked" state: the account session still authorizes reaching
+// the hosted row, but nothing in memory can decrypt it until the passphrase is
+// re-entered.
 function lockApp() {
   if (allocationDraft) closeAllocationEditor();
   activeKey=null; keyMeta=null; vaultGeneration=null; state=null;
@@ -81,6 +92,16 @@ function lockApp() {
   clearTimeout(inactivityTimer);
   $('unlockPass').value='';
   showPanel('unlock');
+}
+
+async function signOutApp() {
+  if (allocationDraft && !discardAllocationDraft()) return;
+  activeKey=null; keyMeta=null; vaultGeneration=null; state=null;
+  externalVaultChangeObserved=false;
+  clearTimeout(inactivityTimer);
+  currentSession=null;
+  try { await authSignOut(); } catch { /* the local session is cleared below regardless */ }
+  showPanel('signin');
 }
 
 function resetInactivity() {
@@ -563,6 +584,9 @@ function renderSettings() {
   $('monthlyIncome').value=Number(state.preferences.monthlyIncome||0);
   $('showScripture').checked=Boolean(state.preferences.showScripture);
   $('lockMinutes').value=String(state.preferences.lockMinutes||60);
+  $('signedInAs').textContent=currentSession?.user?.email
+    ? `Signed in as ${currentSession.user.email}. Locking hides your data but keeps you signed in; signing out also ends this browser's session.`
+    : 'Signed in.';
 }
 
 function renderAll() {
@@ -605,13 +629,16 @@ function bindEvents() {
     if (pass.length<12) return setMessage('lockMessage','Use at least 12 characters.',true);
     if (pass!==confirm) return setMessage('lockMessage','Passphrases do not match.',true);
     try {
-      const created=await stateService.create(pass,setupState);
+      const created=await stateService.create(pass,seed);
       state=created.state;
       activeKey=created.key;keyMeta=created.meta;vaultGeneration=created.vaultGeneration;
       hideVaultConflict();
       $('newPass').value='';$('confirmPass').value='';
       enterApp();
-    } catch(error){setMessage('lockMessage',error.message||'Could not create the vault.',true);}
+    } catch(error) {
+      if (error?.code==='VAULT_AUTH_REQUIRED') { showPanel('signin'); return; }
+      setMessage('lockMessage',error.message||'Could not create the vault.',true);
+    }
   });
   $('unlockVault').addEventListener('click',async()=>{
     try {
@@ -620,9 +647,19 @@ function bindEvents() {
       hideVaultConflict();
       $('unlockPass').value='';
       enterApp();
-    } catch {setMessage('lockMessage','Incorrect passphrase or damaged vault.',true);}
+    } catch(error) {
+      if (error?.code==='VAULT_AUTH_REQUIRED') { showPanel('signin'); return; }
+      if (error?.code==='VAULT_PERSISTENCE_FAILED') { setMessage('lockMessage','Could not reach your encrypted vault. Check your connection and try again.',true); return; }
+      setMessage('lockMessage','Incorrect passphrase or damaged vault.',true);
+    }
   });
   $('unlockPass').addEventListener('keydown',event=>{if(event.key==='Enter')$('unlockVault').click();});
+  $('signInGoogle').addEventListener('click',async()=>{
+    setMessage('lockMessage','');
+    try { await signInWithProvider('google'); }
+    catch(error) { setMessage('lockMessage',error instanceof AuthServiceError?error.message:'Could not start Google sign-in.',true); }
+  });
+  $('signOutNow').addEventListener('click',()=>{signOutApp();});
   document.querySelectorAll('.nav-item').forEach(button=>button.addEventListener('click',()=>selectScreen(button.dataset.screen)));
   $('monthSelect').addEventListener('change',async()=>{try{await applyCanonicalChange(()=>{state.monthly.selectedMonth=$('monthSelect').value;});renderAll();}catch(error){alert(error.message);renderAll();}});
   $('weekSelect').addEventListener('change',async()=>{try{await applyCanonicalChange(()=>{state.review.selectedWeek=$('weekSelect').value;});renderReview();}catch(error){alert(error.message);renderReview();}});
@@ -682,9 +719,9 @@ function bindEvents() {
       else alert('The current passphrase was incorrect.');
     }
   });
-  $('exportBackup').addEventListener('click',()=>{
+  $('exportBackup').addEventListener('click',async()=>{
     try {
-      const blob=new Blob([stateService.exportEncryptedBackup()],{type:'application/json'});
+      const blob=new Blob([await stateService.exportEncryptedBackup()],{type:'application/json'});
       const link=document.createElement('a');
       link.href=URL.createObjectURL(blob);
       link.download=`money-moves-backup-${new Date().toISOString().slice(0,10)}.json`;
@@ -708,9 +745,13 @@ function bindEvents() {
       else alert('The backup or passphrase could not be verified.');
     }
   });
-  $('resetVault').addEventListener('click',()=>{
-    if (!confirm('Erase the encrypted local vault from this browser? Export a backup first.')) return;
-    stateService.clearCurrentVault();location.reload();
+  $('resetVault').addEventListener('click',async()=>{
+    // Your encrypted vault lives in hosted storage now, not this browser, so there is
+    // nothing local to erase. This signs out of the Google account on this device only
+    // -- it does not delete or touch the hosted vault itself. Deleting the hosted vault
+    // is a separate, more consequential action this phase does not implement.
+    if (!confirm('Sign out of Money Moves on this browser? Your encrypted vault is stored securely and is not affected.')) return;
+    await signOutApp();
   });
   for (const eventName of ['pointerdown','keydown','touchstart','scroll']) {
     window.addEventListener(eventName,resetInactivity,{passive:true});
@@ -721,8 +762,8 @@ function bindEvents() {
       if (Date.now()-lastActivity>=timeout) lockApp(); else resetInactivity();
     }
   });
-  window.addEventListener('storage',event=>{
-    if (!state || !vaultRepository.isActiveVaultStorageKey(event.key)) return;
+  unsubscribeVaultChangedElsewhere = vaultRepository.subscribeToVaultChangedElsewhere(()=>{
+    if (!state) return;
     externalVaultChangeObserved=true;
     showVaultConflict();
   });
@@ -734,16 +775,35 @@ function bindEvents() {
   });
 }
 
-function boot() {
-  bindEvents();
-  if (stateService.hasVault()) showPanel('unlock');
-  else {
-    const legacy=stateService.readLegacyState();
-    if (legacy) {
-      setupState=legacy;
-    }
-    showPanel('setup');
-    if (legacy) setMessage('lockMessage','Your existing local data will be encrypted when you create this vault.');
+// Decides which panel to show once we know whether an account session exists.
+// Called on boot and again on every auth-state change (sign-in completing after the
+// Google redirect, a token refresh, or a sign-out from another tab). Skipped while a
+// vault is already unlocked in this tab so a routine token refresh doesn't reset the
+// screen out from under an active session.
+async function routeAfterAuthChange(session) {
+  currentSession = session;
+  if (!session) {
+    if (state) { activeKey=null; keyMeta=null; vaultGeneration=null; state=null; clearTimeout(inactivityTimer); }
+    showPanel('signin');
+    return;
   }
+  if (state) return;
+  try {
+    const has = await stateService.hasVault();
+    showPanel(has ? 'unlock' : 'setup');
+  } catch {
+    setMessage('lockMessage','Could not reach your encrypted vault. Check your connection and try again.',true);
+    showPanel('signin');
+  }
+}
+
+async function boot() {
+  bindEvents();
+  if (!isHostedStorageConfigured()) { showPanel('not-configured'); return; }
+  unsubscribeAuthChange = onAuthStateChange(session => { routeAfterAuthChange(session).catch(()=>{}); });
+  let session = null;
+  try { session = await getCurrentSession(); }
+  catch { showPanel('signin'); return; }
+  await routeAfterAuthChange(session);
 }
 boot();

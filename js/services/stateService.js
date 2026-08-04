@@ -20,7 +20,7 @@ export function createStateService({repository, seed, migrate = migrateState} = 
   }
 
   return {
-    hasVault() {
+    async hasVault() {
       return repository.hasVault();
     },
     readLegacyState() {
@@ -60,7 +60,7 @@ export function createStateService({repository, seed, migrate = migrateState} = 
       });
       return {...changed, state:migration.state, migration};
     },
-    exportEncryptedBackup() {
+    async exportEncryptedBackup() {
       return repository.exportEncryptedBackup();
     },
     async restore(raw, passphrase, {expectedVaultGeneration, coordination} = {}) {

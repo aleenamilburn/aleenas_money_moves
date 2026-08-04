@@ -4,23 +4,23 @@ import {
   V1_TEMP_VAULT_KEY,
   V1_VAULT_AAD,
   V1_VAULT_KEY,
-  V2_TEMP_VAULT_KEY,
   V2_VAULT_AAD,
-  V2_VAULT_KEY,
-  V2_VAULT_PLATFORM_LOCK_NAME,
-  V2_VAULT_WRITE_LEASE_KEY
+  V2_VAULT_PLATFORM_LOCK_NAME
 } from './domain/constants.js';
+import {
+  HostedVaultAuthRequiredError, HostedVaultConflictError, HostedVaultNetworkError,
+  createHostedRow, readHostedRow, subscribeToRemoteWrites, updateHostedRow
+} from './services/hostedVaultStorage.js';
 
 const KDF_ITERATIONS = 600000;
-const WRITE_LEASE_MS = 15000;
 const NO_VAULT_GENERATION = 'mmvg:none';
-const GENERATION_PATTERN = /^mmvg:(?:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|legacy-[A-Za-z0-9_-]{43}|none)$/i;
+const GENERATION_PATTERN = /^mmvg:(?:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|none)$/i;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 export class VaultConflictError extends Error {
   constructor(operation = 'save') {
-    super('Money Moves was updated in another tab. Reload this tab before saving.');
+    super('Money Moves was updated elsewhere. Reload this tab before saving.');
     this.name = 'VaultConflictError';
     this.code = 'VAULT_CONFLICT';
     this.operation = operation;
@@ -44,6 +44,16 @@ export class VaultPersistenceError extends Error {
   }
 }
 
+// Distinguishes "not signed in yet" from a conflict or a persistence failure so the
+// UI can route to the sign-in screen instead of showing a generic save error.
+export class VaultAuthRequiredError extends Error {
+  constructor() {
+    super('Sign in to reach your encrypted vault.');
+    this.name = 'VaultAuthRequiredError';
+    this.code = 'VAULT_AUTH_REQUIRED';
+  }
+}
+
 function bytesToBase64(bytes) {
   let binary='';
   for (const byte of bytes) binary+=String.fromCharCode(byte);
@@ -55,6 +65,13 @@ function base64ToBytes(value) {
   return Uint8Array.from(binary,char=>char.charCodeAt(0));
 }
 
+// --- V1 local recovery (unchanged, orphaned from the hosted flow by design) ---
+//
+// V1 data predates any notion of an authenticated account. It is never blended into
+// a signed-in user's hosted vault automatically (no import, per product decision),
+// but it is never deleted either — these functions remain available as manual
+// recovery primitives.
+
 function parseStoredVault(storageKey) {
   const raw=localStorage.getItem(storageKey);
   if (raw === null) return {exists:false, storageKey};
@@ -62,30 +79,32 @@ function parseStoredVault(storageKey) {
   catch { return {exists:true, raw, storageKey, error:new Error(`Vault record at ${storageKey} is not valid JSON.`)}; }
 }
 
-function parseLease() {
-  const raw = localStorage.getItem(V2_VAULT_WRITE_LEASE_KEY);
-  if (raw === null) return null;
-  try {
-    const lease = JSON.parse(raw);
-    if (lease?.version !== 1 || typeof lease.ownerToken !== 'string' || !Number.isFinite(lease.expiresAt)) return null;
-    return lease;
-  } catch {
-    return null;
-  }
+export function readLegacyState() {
+  const raw=localStorage.getItem(V1_LEGACY_STATE_KEY);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
 }
 
-function currentTime(options = {}) {
-  return typeof options.now === 'function' ? Number(options.now()) : Date.now();
+export function readLocalV1Record() {
+  const v1=parseStoredVault(V1_VAULT_KEY);
+  if (v1.exists) { if (v1.error) throw v1.error; return {...v1, isLegacy:true, isTemporary:false}; }
+  const temp=parseStoredVault(V1_TEMP_VAULT_KEY);
+  if (temp.exists) { if (temp.error) throw temp.error; return {...temp, isLegacy:true, isTemporary:true}; }
+  return null;
 }
 
-function createOwnerToken(options = {}) {
-  return options.ownerToken || `mm-owner:${crypto.randomUUID()}`;
+export function clearVault() {
+  // Hosted rows are deleted by product/account deletion flows, not this call — this
+  // clears only what ever lived in this browser's own storage. V1 keys are never
+  // touched here; a V2 reset must not erase a recoverable V1 vault.
 }
+
+// --- generation helpers (unchanged format; now mirrored into the hosted row) ---
 
 function createGeneration(options = {}) {
   const generation = options.generation || `mmvg:${crypto.randomUUID()}`;
   assertVaultGeneration(generation);
-  if (generation === NO_VAULT_GENERATION || generation.startsWith('mmvg:legacy-')) throw new VaultGenerationError();
+  if (generation === NO_VAULT_GENERATION) throw new VaultGenerationError();
   return generation;
 }
 
@@ -94,59 +113,7 @@ function assertVaultGeneration(value) {
   return value;
 }
 
-function generationFromEnvelope(vault) {
-  if (!Object.prototype.hasOwnProperty.call(vault || {}, 'vaultGeneration')) return null;
-  return assertVaultGeneration(vault.vaultGeneration);
-}
-
-async function digestRawVault(raw) {
-  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(raw));
-  return bytesToBase64(new Uint8Array(digest)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
-
-async function generationForRecord(record) {
-  if (!record) return NO_VAULT_GENERATION;
-  const envelopeGeneration = generationFromEnvelope(record.vault);
-  return envelopeGeneration || `mmvg:legacy-${await digestRawVault(record.raw)}`;
-}
-
-export function readVaultRecord() {
-  const current=parseStoredVault(V2_VAULT_KEY);
-  if (current.exists) {
-    if (current.error) throw current.error;
-    return {...current, isLegacy:false, isTemporary:false};
-  }
-  const temporary=parseStoredVault(V2_TEMP_VAULT_KEY);
-  if (temporary.exists && !temporary.error) return {...temporary, isLegacy:false, isTemporary:true};
-  const v1=parseStoredVault(V1_VAULT_KEY);
-  if (v1.exists) {
-    if (v1.error) throw v1.error;
-    return {...v1, isLegacy:true, isTemporary:false};
-  }
-  const legacyTemporary=parseStoredVault(V1_TEMP_VAULT_KEY);
-  if (legacyTemporary.exists && !legacyTemporary.error) return {...legacyTemporary, isLegacy:true, isTemporary:true};
-  if (temporary.exists && temporary.error) throw temporary.error;
-  if (legacyTemporary.exists && legacyTemporary.error) throw legacyTemporary.error;
-  return null;
-}
-
-export function hasVault() {
-  return [V2_VAULT_KEY, V2_TEMP_VAULT_KEY, V1_VAULT_KEY, V1_TEMP_VAULT_KEY].some(key => localStorage.getItem(key) !== null);
-}
-
-export function readVault() {
-  return readVaultRecord()?.vault || null;
-}
-
-export async function readVaultGeneration() {
-  return generationForRecord(readVaultRecord());
-}
-
-export function readLegacyState() {
-  const raw=localStorage.getItem(V1_LEGACY_STATE_KEY);
-  if (!raw) return null;
-  try { return JSON.parse(raw); } catch { return null; }
-}
+// --- crypto boundary (unchanged; storage-target-agnostic by construction) ---
 
 export async function deriveKey(passphrase,salt,iterations=KDF_ITERATIONS) {
   const material=await crypto.subtle.importKey('raw',encoder.encode(passphrase),'PBKDF2',false,['deriveKey']);
@@ -160,7 +127,7 @@ function aadForVault(vault) {
   return vault?.cipher?.aad || (vault?.version === 1 ? V1_VAULT_AAD : V2_VAULT_AAD);
 }
 
-async function encryptState(state,key,meta,{vaultGeneration = null, pendingWrite = null} = {}) {
+async function encryptState(state,key,meta,{vaultGeneration = null} = {}) {
   const iv=crypto.getRandomValues(new Uint8Array(12));
   const ciphertext=await crypto.subtle.encrypt(
     {name:'AES-GCM',iv,additionalData:encoder.encode(V2_VAULT_AAD)},
@@ -176,7 +143,6 @@ async function encryptState(state,key,meta,{vaultGeneration = null, pendingWrite
     cipher:{name:'AES-GCM',iv:bytesToBase64(iv),aad:V2_VAULT_AAD,ciphertext:bytesToBase64(new Uint8Array(ciphertext))}
   };
   if (vaultGeneration !== null) vault.vaultGeneration = assertVaultGeneration(vaultGeneration);
-  if (pendingWrite) vault.pendingWrite = pendingWrite;
   return vault;
 }
 
@@ -188,166 +154,12 @@ async function decryptState(vault,key) {
   return JSON.parse(decoder.decode(plain));
 }
 
-function readLeaseOwnedBy(ownerToken, options = null) {
-  const lease = parseLease();
-  if (lease?.ownerToken !== ownerToken) return null;
-  if (options && lease.expiresAt <= currentTime(options)) return null;
-  return lease;
-}
-
-function acquireWriteLease(operation, options = {}) {
-  const now = currentTime(options);
-  const existing = parseLease();
-  if (existing && existing.expiresAt > now) throw new VaultConflictError(operation);
-  const ownerToken = createOwnerToken(options);
-  const lease = {version:1, ownerToken, expiresAt:now + Number(options.leaseMs || WRITE_LEASE_MS)};
-  localStorage.setItem(V2_VAULT_WRITE_LEASE_KEY, JSON.stringify(lease));
-  if (!readLeaseOwnedBy(ownerToken, options)) throw new VaultConflictError(operation);
-  return ownerToken;
-}
-
-function renewWriteLease(ownerToken, operation, options = {}) {
-  if (!readLeaseOwnedBy(ownerToken, options)) throw new VaultConflictError(operation);
-  const lease = {version:1, ownerToken, expiresAt:currentTime(options) + Number(options.leaseMs || WRITE_LEASE_MS)};
-  localStorage.setItem(V2_VAULT_WRITE_LEASE_KEY, JSON.stringify(lease));
-  if (!readLeaseOwnedBy(ownerToken, options)) throw new VaultConflictError(operation);
-}
-
-function releaseWriteLease(ownerToken) {
-  if (readLeaseOwnedBy(ownerToken)) localStorage.removeItem(V2_VAULT_WRITE_LEASE_KEY);
-}
-
-function removeOwnedTemporary(ownerToken) {
-  const record = parseStoredVault(V2_TEMP_VAULT_KEY);
-  if (record.exists && !record.error && record.vault?.pendingWrite?.ownerToken === ownerToken) {
-    localStorage.removeItem(V2_TEMP_VAULT_KEY);
-  }
-}
-
-async function currentGenerationForWrite(expectedVaultGeneration, ownerToken = null) {
-  const current = parseStoredVault(V2_VAULT_KEY);
-  if (current.exists) {
-    if (current.error) throw current.error;
-    return generationForRecord({...current, isLegacy:false, isTemporary:false});
-  }
-  const temporary = parseStoredVault(V2_TEMP_VAULT_KEY);
-  if (temporary.exists && !temporary.error) {
-    const pending = temporary.vault?.pendingWrite;
-    if (ownerToken && pending?.ownerToken === ownerToken && pending?.previousVaultGeneration === expectedVaultGeneration) {
-      return expectedVaultGeneration;
-    }
-    return generationForRecord({...temporary, isLegacy:false, isTemporary:true});
-  }
-  const v1 = parseStoredVault(V1_VAULT_KEY);
-  if (v1.exists) {
-    if (v1.error) throw v1.error;
-    return generationForRecord({...v1, isLegacy:true, isTemporary:false});
-  }
-  const legacyTemporary = parseStoredVault(V1_TEMP_VAULT_KEY);
-  if (legacyTemporary.exists && !legacyTemporary.error) {
-    return generationForRecord({...legacyTemporary, isLegacy:true, isTemporary:true});
-  }
-  if (temporary.exists && temporary.error) throw temporary.error;
-  if (legacyTemporary.exists && legacyTemporary.error) throw legacyTemporary.error;
-  return NO_VAULT_GENERATION;
-}
-
-async function assertExpectedGeneration(expectedVaultGeneration, operation, ownerToken = null) {
-  assertVaultGeneration(expectedVaultGeneration);
-  const current = await currentGenerationForWrite(expectedVaultGeneration, ownerToken);
-  if (current !== expectedVaultGeneration) throw new VaultConflictError(operation);
-}
-
-function writerLockManager(options = {}) {
-  if (Object.prototype.hasOwnProperty.call(options, 'platformLockManager')) return options.platformLockManager;
-  return globalThis.navigator?.locks || null;
-}
-
-async function withPlatformWriterLock(operation, options, action) {
-  const manager = writerLockManager(options);
-  const requirePlatformLock = options.requirePlatformLock ?? typeof globalThis.document !== 'undefined';
-  if (!manager || typeof manager.request !== 'function') {
-    if (requirePlatformLock) throw new VaultConflictError(operation);
-    return action();
-  }
-  let entered = false;
-  try {
-    return await manager.request(V2_VAULT_PLATFORM_LOCK_NAME, {mode:'exclusive'}, async lock => {
-      entered = true;
-      if (!lock) throw new VaultConflictError(operation);
-      if (typeof options.afterPlatformLockAcquired === 'function') await options.afterPlatformLockAcquired();
-      return action();
-    });
-  } catch (error) {
-    if (entered) throw error;
-    throw new VaultConflictError(operation);
-  }
-}
-
-async function writeWithLease(vault,key,{expectedVaultGeneration, operation = 'save', ...options} = {}) {
-  assertVaultGeneration(expectedVaultGeneration);
-  if (typeof options.beforeLeaseAcquisition === 'function') await options.beforeLeaseAcquisition();
-  const ownerToken = acquireWriteLease(operation, options);
-  let preserveVerifiedTemporary = false;
-  try {
-    if (typeof options.afterLeaseAcquisition === 'function') await options.afterLeaseAcquisition();
-    if (typeof options.beforeInitialGenerationCheck === 'function') await options.beforeInitialGenerationCheck();
-    await assertExpectedGeneration(expectedVaultGeneration, operation, ownerToken);
-    if (typeof options.afterInitialGenerationCheck === 'function') await options.afterInitialGenerationCheck();
-    if (typeof options.beforeTemporaryWrite === 'function') await options.beforeTemporaryWrite();
-    const vaultGeneration = createGeneration(options);
-    const pendingWrite = {version:1, ownerToken, previousVaultGeneration:expectedVaultGeneration};
-    const temporaryVault = {...vault, vaultGeneration, pendingWrite};
-    localStorage.setItem(V2_TEMP_VAULT_KEY, JSON.stringify(temporaryVault));
-    if (typeof options.afterTemporaryWrite === 'function') await options.afterTemporaryWrite();
-    const storedTemporary = JSON.parse(localStorage.getItem(V2_TEMP_VAULT_KEY));
-    await decryptState(storedTemporary, key);
-    if (typeof options.afterTemporaryVerification === 'function') await options.afterTemporaryVerification();
-    renewWriteLease(ownerToken, operation, options);
-    if (typeof options.beforePromotion === 'function') await options.beforePromotion();
-    if (!readLeaseOwnedBy(ownerToken, options)) throw new VaultConflictError(operation);
-    if (typeof options.beforeFinalGenerationCheck === 'function') await options.beforeFinalGenerationCheck();
-    await assertExpectedGeneration(expectedVaultGeneration, operation, ownerToken);
-    if (typeof options.afterFinalGenerationCheck === 'function') await options.afterFinalGenerationCheck();
-    if (!readLeaseOwnedBy(ownerToken, options)) throw new VaultConflictError(operation);
-    await assertExpectedGeneration(expectedVaultGeneration, operation, ownerToken);
-    const activeVault = {...storedTemporary};
-    delete activeVault.pendingWrite;
-    preserveVerifiedTemporary = true;
-    localStorage.setItem(V2_VAULT_KEY, JSON.stringify(activeVault));
-    if (typeof options.afterActivePromotion === 'function') await options.afterActivePromotion();
-    if (typeof options.beforeTemporaryCleanup === 'function') await options.beforeTemporaryCleanup();
-    preserveVerifiedTemporary = false;
-    localStorage.removeItem(V2_TEMP_VAULT_KEY);
-    return {meta:metaFromVault(activeVault), vaultGeneration};
-  } catch (error) {
-    if (!preserveVerifiedTemporary) removeOwnedTemporary(ownerToken);
-    throw error;
-  } finally {
-    releaseWriteLease(ownerToken);
-  }
-}
-
-async function writeCoordinated(vault,key,{expectedVaultGeneration, operation = 'save', ...options} = {}) {
-  assertVaultGeneration(expectedVaultGeneration);
-  try {
-    return await withPlatformWriterLock(operation, options, () => writeWithLease(vault, key, {
-      ...options,
-      expectedVaultGeneration,
-      operation
-    }));
-  } catch (error) {
-    if (error instanceof VaultConflictError || error instanceof VaultGenerationError || error instanceof VaultPersistenceError) throw error;
-    throw new VaultPersistenceError(operation);
-  }
-}
-
 function metaFromVault(vault) {
   return {
     createdAt:vault.createdAt,
     iterations:vault.kdf.iterations,
     salt:base64ToBytes(vault.kdf.salt),
-    vaultGeneration:generationFromEnvelope(vault)
+    vaultGeneration:vault.vaultGeneration || null
   };
 }
 
@@ -357,56 +169,142 @@ function assertSupportedVault(vault) {
   }
 }
 
+// --- Web Lock: same-device optimization only, not the write-safety authority ---
+//
+// Correctness against concurrent writers (same device or different) is enforced by
+// the hosted conditional write's row-count signal. The lock here only coalesces
+// multiple tabs on this one device into serialized requests, avoiding wasted network
+// round trips and keeping the existing same-device conflict-banner UX responsive.
+
+function writerLockManager(options = {}) {
+  if (Object.prototype.hasOwnProperty.call(options, 'platformLockManager')) return options.platformLockManager;
+  return globalThis.navigator?.locks || null;
+}
+
+async function withPlatformWriterLock(options, action) {
+  const manager = writerLockManager(options);
+  if (!manager || typeof manager.request !== 'function') return action();
+  return manager.request(V2_VAULT_PLATFORM_LOCK_NAME, {mode:'exclusive'}, lock => {
+    if (!lock) return action();
+    return action();
+  });
+}
+
+function mapHostedError(error, operation) {
+  if (error instanceof HostedVaultConflictError) return new VaultConflictError(operation);
+  if (error instanceof HostedVaultAuthRequiredError) return new VaultAuthRequiredError();
+  if (error instanceof HostedVaultNetworkError) return new VaultPersistenceError(operation);
+  return error;
+}
+
+// One coordinated write: encrypt already happened in the caller; this decrypts the
+// freshly-encrypted vault locally (cheap, no network) to catch a broken ciphertext
+// before ever sending it, then performs the single atomic write. `isCreate` selects
+// insert-if-absent vs. conditional-update-if-matching; both paths share the same
+// idempotent-retry-safe outcome contract (see hostedVaultStorage.js).
+async function writeCoordinated(vault, key, {expectedVaultGeneration, operation = 'save', isCreate = false, ...options} = {}) {
+  assertVaultGeneration(expectedVaultGeneration);
+  return withPlatformWriterLock(options, async () => {
+    try {
+      await decryptState(vault, key);
+    } catch {
+      throw new VaultPersistenceError(operation);
+    }
+    if (typeof options.beforeNetworkWrite === 'function') await options.beforeNetworkWrite();
+    try {
+      const written = isCreate
+        ? await createHostedRow({generation: vault.vaultGeneration, blob: vault})
+        : await updateHostedRow({expectedGeneration: expectedVaultGeneration, nextGeneration: vault.vaultGeneration, blob: vault});
+      if (typeof options.afterNetworkWrite === 'function') await options.afterNetworkWrite();
+      return {meta: metaFromVault(vault), vaultGeneration: written.generation};
+    } catch (error) {
+      throw mapHostedError(error, operation);
+    }
+  });
+}
+
+export async function readVaultRecord() {
+  let hostedRow;
+  try {
+    hostedRow = await readHostedRow();
+  } catch (error) {
+    throw mapHostedError(error, 'read');
+  }
+  if (!hostedRow) return null;
+  return {
+    exists:true,
+    vault:hostedRow.blob,
+    raw:JSON.stringify(hostedRow.blob),
+    storageKey:'hosted:vaults',
+    isLegacy:false,
+    isTemporary:false
+  };
+}
+
+export function readVault() {
+  throw new Error('readVault() is synchronous and cannot reach hosted storage; use readVaultRecord() instead.');
+}
+
+export async function hasVault() {
+  const record = await readVaultRecord();
+  return record !== null;
+}
+
+export async function readVaultGeneration() {
+  const record = await readVaultRecord();
+  return record ? record.vault.vaultGeneration : NO_VAULT_GENERATION;
+}
+
 export async function createVault(state,passphrase,options = {}) {
+  const existing = await readVaultRecord();
+  if (existing) throw new VaultConflictError('create');
   const salt=crypto.getRandomValues(new Uint8Array(16));
   const key=await deriveKey(passphrase,salt);
   const meta={createdAt:new Date().toISOString(),iterations:KDF_ITERATIONS,salt};
-  if (localStorage.getItem(V2_VAULT_KEY) !== null || localStorage.getItem(V2_TEMP_VAULT_KEY) !== null) {
-    throw new VaultConflictError('create');
-  }
-  const expectedVaultGeneration = await currentGenerationForWrite(NO_VAULT_GENERATION);
-  const vault=await encryptState(state,key,meta);
-  const written = await writeCoordinated(vault,key,{...options, expectedVaultGeneration, operation:'create'});
-  return {state,key,meta:written.meta,vaultGeneration:written.vaultGeneration,sourceStorageKey:V2_VAULT_KEY,needsVaultMigration:false};
+  const generation = createGeneration(options);
+  const vault=await encryptState(state,key,meta,{vaultGeneration:generation});
+  const written = await writeCoordinated(vault,key,{...options, expectedVaultGeneration:NO_VAULT_GENERATION, operation:'create', isCreate:true});
+  return {state,key,meta:written.meta,vaultGeneration:written.vaultGeneration,sourceStorageKey:'hosted:vaults',needsVaultMigration:false};
 }
 
 export async function unlock(passphrase) {
-  const record=readVaultRecord();
+  const record=await readVaultRecord();
   if (!record) throw new Error('No encrypted vault exists.');
   assertSupportedVault(record.vault);
-  const vaultGeneration=await generationForRecord(record);
-  const meta={...metaFromVault(record.vault), vaultGeneration};
+  const meta=metaFromVault(record.vault);
   const key=await deriveKey(passphrase,meta.salt,meta.iterations);
   const state=await decryptState(record.vault,key);
-  const needsVaultMigration=record.isLegacy || record.isTemporary || record.vault.version !== 2 || record.vault.product !== PRODUCT_NAME;
-  return {state,key,meta,vaultGeneration,sourceStorageKey:record.storageKey,needsVaultMigration};
+  const needsVaultMigration=record.vault.version !== 2 || record.vault.product !== PRODUCT_NAME;
+  return {state,key,meta,vaultGeneration:meta.vaultGeneration,sourceStorageKey:record.storageKey,needsVaultMigration};
 }
 
 export async function saveVault(state,key,meta,{expectedVaultGeneration = meta?.vaultGeneration, ...options} = {}) {
   assertVaultGeneration(expectedVaultGeneration);
-  const vault=await encryptState(state,key,meta);
-  return writeCoordinated(vault,key,{...options, expectedVaultGeneration, operation:'save'});
+  const generation = createGeneration(options);
+  const vault=await encryptState(state,key,meta,{vaultGeneration:generation});
+  return writeCoordinated(vault,key,{...options, expectedVaultGeneration, operation:'save', isCreate:false});
 }
 
 export async function changePassphrase(state,currentPassphrase,newPassphrase,{expectedVaultGeneration, ...options} = {}) {
   assertVaultGeneration(expectedVaultGeneration);
-  await assertExpectedGeneration(expectedVaultGeneration, 'change-passphrase');
-  const currentRecord=readVaultRecord();
+  const currentRecord=await readVaultRecord();
   if (!currentRecord) throw new Error('No vault found.');
   assertSupportedVault(currentRecord.vault);
+  if (currentRecord.vault.vaultGeneration !== expectedVaultGeneration) throw new VaultConflictError('change-passphrase');
   const currentMeta=metaFromVault(currentRecord.vault);
   const currentKey=await deriveKey(currentPassphrase,currentMeta.salt,currentMeta.iterations);
   await decryptState(currentRecord.vault,currentKey);
   const salt=crypto.getRandomValues(new Uint8Array(16));
   const key=await deriveKey(newPassphrase,salt);
   const meta={createdAt:currentRecord.vault.createdAt,iterations:KDF_ITERATIONS,salt};
-  const next=await encryptState(state,key,meta);
-  const written=await writeCoordinated(next,key,{...options, expectedVaultGeneration, operation:'change-passphrase'});
+  const generation = createGeneration(options);
+  const next=await encryptState(state,key,meta,{vaultGeneration:generation});
+  const written=await writeCoordinated(next,key,{...options, expectedVaultGeneration, operation:'change-passphrase', isCreate:false});
   return {key,meta:written.meta,vaultGeneration:written.vaultGeneration};
 }
 
-export function exportEncryptedBackup() {
-  const record=readVaultRecord();
+export async function exportEncryptedBackup() {
+  const record=await readVaultRecord();
   if (!record) throw new Error('No vault found.');
   return record.raw;
 }
@@ -414,29 +312,22 @@ export function exportEncryptedBackup() {
 export async function verifyBackup(raw,passphrase) {
   const vault=JSON.parse(raw);
   assertSupportedVault(vault);
-  const vaultGeneration=await generationForRecord({vault,raw});
-  const meta={...metaFromVault(vault), vaultGeneration};
+  const meta=metaFromVault(vault);
   const key=await deriveKey(passphrase,meta.salt,meta.iterations);
   const state=await decryptState(vault,key);
-  return {vault,state,key,meta,vaultGeneration,needsVaultMigration:vault.version !== 2 || vault.product !== PRODUCT_NAME};
+  return {vault,state,key,meta,vaultGeneration:meta.vaultGeneration,needsVaultMigration:vault.version !== 2 || vault.product !== PRODUCT_NAME};
 }
 
-export function clearVault() {
-  localStorage.removeItem(V2_VAULT_KEY);
-  localStorage.removeItem(V2_TEMP_VAULT_KEY);
-  localStorage.removeItem(V2_VAULT_WRITE_LEASE_KEY);
-  // Never delete V1 keys here. A V2 reset must not erase a recoverable V1 vault.
+// Same-device early warning only (see subscribeToRemoteWrites in hostedVaultStorage.js).
+export function subscribeToVaultChangedElsewhere(callback) {
+  return subscribeToRemoteWrites(callback);
 }
 
 export const vaultConstants={
-  VAULT_KEY:V2_VAULT_KEY,
-  TEMP_KEY:V2_TEMP_VAULT_KEY,
-  WRITE_LEASE_KEY:V2_VAULT_WRITE_LEASE_KEY,
   LEGACY_VAULT_KEY:V1_VAULT_KEY,
   LEGACY_TEMP_KEY:V1_TEMP_VAULT_KEY,
   LEGACY_STATE_KEY:V1_LEGACY_STATE_KEY,
   KDF_ITERATIONS,
-  WRITE_LEASE_MS,
   NO_VAULT_GENERATION,
   PLATFORM_LOCK_NAME:V2_VAULT_PLATFORM_LOCK_NAME
 };
