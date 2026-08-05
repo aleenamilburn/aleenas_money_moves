@@ -1,4 +1,5 @@
 import {PRODUCT_NAME, STARTER_SPENDING_BUCKETS, STATE_SCHEMA_VERSION, SYSTEM_BUCKET_IDS, UNKNOWN_ACCOUNT_ID} from './constants.js';
+import {FAITH_MONEY_DEVOTIONALS} from '../content/faithMoneyDevotionals.js';
 import {createUnknownAccount, validateAuditEvent, validateDomainStore, validateBucket} from './models.js';
 import {canonicalTransactionFromLegacy, deterministicAllocationId} from '../services/allocationService.js';
 import {initializeStateRevision} from '../services/stateRevision.js';
@@ -10,7 +11,8 @@ const FOUNDATION_MIGRATIONS = [
   {from:4, to:5, id:'v2a-bucket-explorer-fields', migrate:initializeBucketExplorerFields},
   {from:5, to:6, id:'v2a-transaction-allocations', migrate:migrateTraceableLegacyAssignments},
   {from:6, to:7, id:'v2a-reimbursement-relationship-foundation', migrate:migrateReimbursementRelationships},
-  {from:7, to:8, id:'v2b-desktop-beta-bucket-workflow', migrate:initializeDesktopBetaBucketWorkflow}
+  {from:7, to:8, id:'v2b-desktop-beta-bucket-workflow', migrate:initializeDesktopBetaBucketWorkflow},
+  {from:8, to:9, id:'v2c-faith-money-devotional-state', migrate:initializeFaithMoneyDevotionalState}
 ];
 
 function clone(value) {
@@ -98,7 +100,8 @@ function assertValidMigrationState(state, phase) {
     const version = sourceVersion(state);
     const validation = validateDomainStore(state.domain, {
       legacyReimbursements:version < 7,
-      legacySemanticType:version < 8
+      legacySemanticType:version < 8,
+      legacyDevotionalState:version < 9
     });
     if (!validation.ok) throw new Error(`${phase} state failed foundation validation: ${validation.errors.join('; ')}`);
   }
@@ -343,6 +346,21 @@ function initializeDesktopBetaBucketWorkflow(state, {now, freshVaultAtStart = fa
     }
   }
   for (const bucket of domain.buckets) mirrorBucketToLegacyReview(state, bucket);
+  return state;
+}
+
+function initializeFaithMoneyDevotionalState(state, {now}) {
+  initializeDomainStore(state, {now});
+  if (state.domain.devotionalState === undefined) {
+    state.domain.devotionalState = {
+      activeDevotionalId:FAITH_MONEY_DEVOTIONALS[0].id,
+      rotationStartedAt:now,
+      lastOpenedAt:null,
+      completedDevotionalIds:[],
+      savedDevotionalIds:[],
+      entries:[]
+    };
+  }
   return state;
 }
 
@@ -800,5 +818,5 @@ export function migrateState(input, {now} = {}) {
 }
 
 export function validateFoundationDomain(domain) {
-  return validateDomainStore(domain);
+  return validateDomainStore(domain, {legacyDevotionalState:false});
 }

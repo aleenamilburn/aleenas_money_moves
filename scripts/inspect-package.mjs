@@ -75,7 +75,7 @@ try {
         violations.push(`app.asar:${entry}`);
       }
     }
-    for (const required of ['data.js', 'electron/main.js', 'electron/preload.cjs', 'js/app.js', 'js/startup-status.js', 'js/services/desktopStartup.js', 'assets/brand/money-moves-mark.png']) {
+    for (const required of ['data.js', 'electron/main.js', 'electron/preload.cjs', 'js/app.js', 'js/content/faithMoneyDevotionals.js', 'js/services/devotionalService.js', 'js/startup-status.js', 'js/services/desktopStartup.js', 'assets/brand/money-moves-mark.png']) {
       if (!entries.includes(required)) violations.push(`missing packaged ${required}`);
     }
     if (entries.includes('electron/preload.js')) violations.push('packaged obsolete Electron preload.js');

@@ -6,7 +6,7 @@
 - Branch: `main`
 - Hosted correction preservation checkpoint: `c591368` (`Harden hosted storage correction candidate`)
 - Desktop foundation candidate reviewed: `v2-desktop-foundation-candidate` (`99c04ee`, `Implement desktop-first Electron foundation`)
-- Current domain schema: 8
+- Current domain schema: 9
 - Desktop package version: `2.0.0-desktop.0`
 - Founder direction: macOS-first Electron desktop app with one authoritative encrypted local vault per owner.
 
@@ -49,6 +49,12 @@ inspection (287 filesystem files and 42 ASAR entries). The direct ARM64 bundle
 and read-only mounted DMG were verified; the recorded founder A–F synthetic
 matrix remains PASS.
 
+## Faith & Money devotional candidate
+
+`FAITH_AND_MONEY_DEVOTIONALS_IMPLEMENTATION.md` records the schema-9 candidate. It adds an original, static, public-domain-WEB devotional library; optional user reflections and progress remain inside the authoritative encrypted local vault. The new reader, history, deterministic progression, dirty-draft guard, validation, and rollback service are implemented. Candidate automated validation passed (182 unit tests, 27 Electron tests, syntax/compile/diff/content checks, ARM64 package/DMG/ZIP, and package inspection). The direct bundle passed create/save/relaunch/unlock/complete/next/history using a disposable profile; the mounted read-only DMG passed fresh-vault, Overview, reader, library, and prompt rendering, with byte-identical `app.asar`. Independent acceptance must still run the native-dialog backup/change/restore round trip plus remaining privacy and layout checks.
+
+Signing/notarization remains technically unblocked by the devotional code but should wait for this candidate’s independent acceptance and remaining release-Mac checks. Plaid remains the next major integration only after devotional acceptance; travel work remains deferred.
+
 ## Validation evidence
 
 - `CI=true pnpm run check`: passed.
@@ -61,9 +67,8 @@ matrix remains PASS.
 
 ## Recommended next task
 
-Perform the final beta-Mac native export → import → restore click-through and
-Finder/Dock/application-switcher icon-cache observation, then scope a Developer
-ID signing/notarization release-readiness task. From the V2B workflow gate, a
-separately approved Faith & Money devotional phase may be planned. Do not begin
-Plaid, cloud backup, hosted sync, phone support, shared vaults, or travel work
-without separately approved phases.
+Perform independent Faith & Money acceptance, starting with the outstanding
+native-dialog encrypted backup/change/restore round trip and the remaining
+privacy/layout checks. After devotional acceptance, Plaid may be scoped as the
+next major integration. Do not begin cloud backup, hosted sync, phone support,
+shared vaults, or travel work without separately approved phases.

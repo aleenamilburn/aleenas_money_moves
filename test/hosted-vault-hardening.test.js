@@ -7,7 +7,7 @@ import {
 import {createStateService, LocalVaultAdoptionConflictError} from '../js/services/stateService.js';
 import {createVaultRepository} from '../js/services/vaultRepository.js';
 import {setSupabaseClientForTests} from '../js/services/supabaseClient.js';
-import {V1_VAULT_KEY} from '../js/domain/constants.js';
+import {STATE_SCHEMA_VERSION, V1_VAULT_KEY} from '../js/domain/constants.js';
 import {
   createLegacyV1Envelope, currentFakeVaultsTable, installBrowserGlobals,
   legacyV1State, TEST_USER_ID
@@ -153,7 +153,7 @@ test('explicit V1 adoption migrates and uploads only when no hosted vault exists
   const adopted = await service.adoptLocalVault(passphrase);
   assert.equal(adopted.preservedLocalRecovery, true);
   assert.equal(localStorage.getItem(V1_VAULT_KEY), legacyRaw);
-  assert.equal((await unlock(passphrase)).state.schemaVersion, 8);
+  assert.equal((await unlock(passphrase)).state.schemaVersion, STATE_SCHEMA_VERSION);
 });
 
 test('explicit V1 adoption refuses to overwrite an existing hosted vault and leaves both records intact', async () => {

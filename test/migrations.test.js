@@ -14,9 +14,10 @@ test('V1 state migrates without mutating the source and produces legacy snapshot
   assert.equal(result.toVersion, STATE_SCHEMA_VERSION);
   assert.equal(result.state.schemaVersion, STATE_SCHEMA_VERSION);
   assert.equal(result.state.app.name, 'Money Moves');
-  assert.deepEqual(result.applied, ['v1-preserve-legacy-state', 'v2-foundation-domain-store', 'v2-foundation-canonical-name', 'v2a-bucket-explorer-fields', 'v2a-transaction-allocations', 'v2a-reimbursement-relationship-foundation', 'v2b-desktop-beta-bucket-workflow']);
+  assert.deepEqual(result.applied, ['v1-preserve-legacy-state', 'v2-foundation-domain-store', 'v2-foundation-canonical-name', 'v2a-bucket-explorer-fields', 'v2a-transaction-allocations', 'v2a-reimbursement-relationship-foundation', 'v2b-desktop-beta-bucket-workflow', 'v2c-faith-money-devotional-state']);
   assert.equal(result.state.domain.accounts[0].id, 'unknown-account');
   assert.equal(result.state.domain.buckets.length, 5);
+  assert.equal(result.state.domain.devotionalState.activeDevotionalId, 'faith-money-mammon');
   assert.equal(result.state.domain.legacyMonthlySnapshots[0].bucketActualsCents.groceries, 12550);
   assert.equal(result.state.domain.legacyBalanceSnapshots[0].label.includes('not normalized account history'), true);
   assert.equal(validateFoundationDomain(result.state.domain).ok, true);

@@ -1,5 +1,5 @@
 export const PRODUCT_NAME = 'Money Moves';
-export const STATE_SCHEMA_VERSION = 8;
+export const STATE_SCHEMA_VERSION = 9;
 export const DEFAULT_CURRENCY = 'USD';
 export const UNKNOWN_ACCOUNT_ID = 'unknown-account';
 
@@ -19,6 +19,9 @@ export const STARTER_SPENDING_BUCKETS = Object.freeze([
   {id:'mm-starter-food', name:'Food', group:'Essentials'},
   {id:'mm-starter-transportation', name:'Transportation', group:'Essentials'}
 ]);
+
+export const DEVOTIONAL_RESPONSE_MAX_CHARS = 10000;
+export const DEVOTIONAL_PRIVATE_NOTES_MAX_CHARS = 20000;
 
 // V2_VAULT_KEY, V2_TEMP_VAULT_KEY, and V2_VAULT_WRITE_LEASE_KEY (former localStorage
 // keys for the active vault, its in-flight temp record, and the persisted write

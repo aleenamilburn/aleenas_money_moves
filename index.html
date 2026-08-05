@@ -70,6 +70,7 @@
       </div>
       <nav id="mainNav">
         <button class="nav-item active" data-screen="overview"><span>◫</span>Overview</button>
+        <button class="nav-item" data-screen="devotionals"><span>✦</span>Faith &amp; Money</button>
         <button class="nav-item" data-screen="review"><span>✓</span>Weekly review <b id="navReviewCount">0</b></button>
         <button class="nav-item" data-screen="buckets"><span>≡</span>Buckets & rules</button>
         <button class="nav-item" data-screen="travel"><span>✈</span>Travel</button>
@@ -126,11 +127,12 @@
             <div id="overviewBuckets" class="progress-list"></div>
           </article>
           <div class="stack">
-            <article class="panel scripture-panel" id="scriptureCard">
-              <p class="eyebrow">STEWARDSHIP REFLECTION</p>
-              <blockquote id="scriptureText"></blockquote>
-              <strong id="scriptureReference"></strong>
-              <p id="scriptureTheme"></p>
+            <article class="panel scripture-panel faith-money-card" id="faithMoneyCard">
+              <div class="panel-head"><div><p class="eyebrow">FAITH &amp; MONEY</p><h2 id="faithMoneyTitle">Faith &amp; Money</h2></div><span class="badge" id="faithMoneyStatus">Current</span></div>
+              <blockquote id="faithMoneyVerse"></blockquote>
+              <strong id="faithMoneyReference"></strong>
+              <p id="faithMoneyTheme"></p>
+              <button class="primary" id="openActiveDevotional">Read devotional</button>
             </article>
             <article class="panel">
               <div class="panel-head"><div><p class="eyebrow">NEXT MOVE</p><h2>Utilization priority</h2></div></div>
@@ -143,6 +145,47 @@
           <div class="panel-head"><div><p class="eyebrow">CURRENT DATA</p><h2>Connected account snapshot</h2></div><span class="badge" id="coverageBadge"></span></div>
           <div id="accountStrip" class="account-strip"></div>
         </article>
+      </section>
+
+      <section class="screen" id="screen-devotionals">
+        <div class="panel devotional-intro">
+          <div><p class="eyebrow">FAITH &amp; MONEY</p><h2>Scripture, reflection, and private journaling</h2><p>Your optional responses are saved only inside your encrypted Money Moves vault. You can read, save, or complete at your own pace.</p></div>
+          <button id="returnToOverview">Return to Overview</button>
+        </div>
+        <div class="devotional-layout">
+          <article class="panel devotional-reader" aria-labelledby="devotionalReaderTitle">
+            <div class="panel-head"><div><p class="eyebrow" id="devotionalReaderTheme">THEME</p><h2 id="devotionalReaderTitle" tabindex="-1">Faith &amp; Money</h2><p id="devotionalReaderMeta"></p></div><span class="badge" id="devotionalReaderProgress">Current</span></div>
+            <section class="devotional-scripture" aria-labelledby="devotionalScriptureHeading">
+              <p class="eyebrow" id="devotionalScriptureHeading">SCRIPTURE</p>
+              <blockquote id="devotionalVerse"></blockquote>
+              <p id="devotionalReference" class="devotional-reference"></p>
+            </section>
+            <section class="devotional-reflection" aria-labelledby="devotionalReflectionHeading">
+              <p class="eyebrow" id="devotionalReflectionHeading">REFLECTION</p>
+              <div id="devotionalText"></div>
+              <p id="devotionalClosing" class="devotional-closing"></p>
+            </section>
+            <section class="devotional-journal" aria-labelledby="devotionalJournalHeading">
+              <div><p class="eyebrow" id="devotionalJournalHeading">PRIVATE JOURNAL</p><p>Each prompt is optional. Plain text only; progress is not saved until you choose Save progress.</p></div>
+              <div id="devotionalPrompts" class="devotional-prompts"></div>
+              <label class="devotional-note-label" for="devotionalPrivateNotes">Private notes <span>Optional · up to 20,000 characters</span></label>
+              <textarea id="devotionalPrivateNotes" maxlength="20000" rows="6" placeholder="Write anything you want to remember privately."></textarea>
+              <p class="form-message" id="devotionalMessage" role="status" aria-live="polite"></p>
+              <div class="devotional-actions">
+                <button id="saveDevotionalProgress">Save progress</button>
+                <button id="toggleSavedDevotional">Save devotional</button>
+                <button class="primary" id="completeDevotional">Mark complete</button>
+                <button class="primary hidden" id="advanceDevotional">Continue to next devotional</button>
+              </div>
+            </section>
+          </article>
+          <aside class="stack devotional-library-panel">
+            <article class="panel">
+              <div class="panel-head"><div><p class="eyebrow">LIBRARY &amp; HISTORY</p><h2>All twelve devotionals</h2><p>Reopen a saved or completed devotional to review your own encrypted responses.</p></div></div>
+              <div id="devotionalLibrary" class="devotional-library" aria-label="Faith and Money devotional library"></div>
+            </article>
+          </aside>
+        </div>
       </section>
 
       <section class="screen" id="screen-review">

@@ -1,4 +1,8 @@
-import {BUCKET_SEMANTIC_TYPES, DEFAULT_CURRENCY, SYSTEM_BUCKET_IDS, UNKNOWN_ACCOUNT_ID} from './constants.js';
+import {
+  BUCKET_SEMANTIC_TYPES, DEFAULT_CURRENCY, DEVOTIONAL_PRIVATE_NOTES_MAX_CHARS,
+  DEVOTIONAL_RESPONSE_MAX_CHARS, SYSTEM_BUCKET_IDS, UNKNOWN_ACCOUNT_ID
+} from './constants.js';
+import {devotionalById} from '../content/faithMoneyDevotionals.js';
 
 export const ACCOUNT_TYPES = new Set(['cash', 'credit', 'loan', 'savings', 'investment', 'unknown']);
 export const TRANSACTION_SOURCES = new Set(['manual', 'csv', 'migration']);
@@ -228,6 +232,73 @@ export function validateAllocation(value) {
   // Readable only for schema-6 compatibility. Schema 7 relationships are standalone.
   optionalString(value.reimbursementClaimId, 'reimbursementClaimId', errors);
   return validationResult('Allocation', value, errors);
+}
+
+export function validateDevotionalState(value) {
+  const errors = [];
+  if (!isPlainObject(value)) return validationResult('DevotionalState', value, ['devotionalState must be an object']);
+  rejectUnknownFields(value, new Set([
+    'activeDevotionalId', 'rotationStartedAt', 'lastOpenedAt', 'completedDevotionalIds', 'savedDevotionalIds', 'entries'
+  ]), 'DevotionalState', errors);
+  requiredString(value.activeDevotionalId, 'activeDevotionalId', errors);
+  if (typeof value.activeDevotionalId === 'string' && !devotionalById(value.activeDevotionalId)) errors.push('activeDevotionalId must reference library content');
+  requiredTimestamp(value.rotationStartedAt, 'rotationStartedAt', errors);
+  optionalTimestamp(value.lastOpenedAt, 'lastOpenedAt', errors);
+  for (const field of ['completedDevotionalIds', 'savedDevotionalIds', 'entries']) {
+    if (!Array.isArray(value[field])) errors.push(`${field} must be an array`);
+  }
+  const validateIdList = (items, field) => {
+    const seen = new Set();
+    for (const devotionalId of items || []) {
+      if (typeof devotionalId !== 'string' || !devotionalById(devotionalId)) errors.push(`${field} contains an unknown devotional`);
+      else if (seen.has(devotionalId)) errors.push(`${field} contains duplicate devotional id`);
+      seen.add(devotionalId);
+    }
+  };
+  validateIdList(value.completedDevotionalIds, 'completedDevotionalIds');
+  validateIdList(value.savedDevotionalIds, 'savedDevotionalIds');
+  const entryIds = new Set();
+  const entryDevotionalIds = new Set();
+  for (const entry of value.entries || []) {
+    if (!isPlainObject(entry)) { errors.push('devotional entry must be an object'); continue; }
+    rejectUnknownFields(entry, new Set([
+      'id', 'devotionalId', 'promptResponses', 'privateNotes', 'startedAt', 'updatedAt', 'completedAt', 'contentVersion'
+    ]), 'DevotionalEntry', errors);
+    requiredString(entry.id, 'entry.id', errors);
+    requiredString(entry.devotionalId, 'entry.devotionalId', errors);
+    if (entryIds.has(entry.id)) errors.push('devotional entries contain duplicate id');
+    entryIds.add(entry.id);
+    if (entryDevotionalIds.has(entry.devotionalId)) errors.push('devotional entries contain duplicate devotionalId');
+    entryDevotionalIds.add(entry.devotionalId);
+    const content = devotionalById(entry.devotionalId);
+    if (!content) errors.push('devotional entry references unknown devotional');
+    if (!Array.isArray(entry.promptResponses) || entry.promptResponses.length > 3) errors.push('promptResponses must contain at most three items');
+    const promptIds = new Set();
+    for (const response of entry.promptResponses || []) {
+      if (!isPlainObject(response)) { errors.push('prompt response must be an object'); continue; }
+      rejectUnknownFields(response, new Set(['promptId', 'response']), 'PromptResponse', errors);
+      requiredString(response.promptId, 'promptId', errors);
+      if (!content?.prompts.some(prompt => prompt.id === response.promptId)) errors.push('prompt response references unknown prompt');
+      if (promptIds.has(response.promptId)) errors.push('promptResponses contain duplicate prompt id');
+      promptIds.add(response.promptId);
+      if (typeof response.response !== 'string') errors.push('prompt response must be plain text');
+      else if (response.response.length > DEVOTIONAL_RESPONSE_MAX_CHARS) errors.push('prompt response exceeds the size limit');
+    }
+    if (typeof entry.privateNotes !== 'string') errors.push('privateNotes must be plain text');
+    else if (entry.privateNotes.length > DEVOTIONAL_PRIVATE_NOTES_MAX_CHARS) errors.push('privateNotes exceeds the size limit');
+    requiredTimestamp(entry.startedAt, 'startedAt', errors);
+    requiredTimestamp(entry.updatedAt, 'updatedAt', errors);
+    optionalTimestamp(entry.completedAt, 'completedAt', errors);
+    requiredInteger(entry.contentVersion, 'contentVersion', errors, {min:1});
+    if (entry.completedAt !== null && entry.completedAt !== undefined && !value.completedDevotionalIds?.includes(entry.devotionalId)) {
+      errors.push('completed devotional entry must appear in completedDevotionalIds');
+    }
+  }
+  for (const devotionalId of value.completedDevotionalIds || []) {
+    const entry = (value.entries || []).find(item => item?.devotionalId === devotionalId);
+    if (!entry?.completedAt) errors.push('completedDevotionalIds must have a completed entry');
+  }
+  return validationResult('DevotionalState', value, errors);
 }
 
 export function validateReimbursementClaim(value) {
@@ -617,7 +688,7 @@ function validateReimbursementRelationships(domain, errors) {
   }
 }
 
-export function validateDomainStore(domain, {legacyReimbursements = false, legacySemanticType = false} = {}) {
+export function validateDomainStore(domain, {legacyReimbursements = false, legacySemanticType = false, legacyDevotionalState = true} = {}) {
   const errors = [];
   if (!isPlainObject(domain)) return validationResult('DomainStore', domain, ['domain must be an object']);
   for (const [field, validator] of [
@@ -640,6 +711,11 @@ export function validateDomainStore(domain, {legacyReimbursements = false, legac
       ['reimbursementAdjustments', validateReimbursementAdjustment],
       ['auditEvents', validateAuditEvent]
     ]) validateCollection(domain, field, validator, errors);
+  }
+  if (errors.length) return validationResult('DomainStore', domain, errors);
+  if (!legacyDevotionalState || domain.devotionalState !== undefined) {
+    const devotionalValidation = validateDevotionalState(domain.devotionalState);
+    if (!devotionalValidation.ok) errors.push(...devotionalValidation.errors.map(error => `devotionalState: ${error}`));
   }
   if (errors.length) return validationResult('DomainStore', domain, errors);
   validateBaseRelationships(domain, errors, {legacySemanticType});

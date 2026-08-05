@@ -13,10 +13,21 @@ import {
   upgradeStateWithMigration, money, monthLabel, availableMonths, availableWeeks, weekLabel,
   weekStats, weekTransactions, reviewQueue, addTransactions,
   monthSummary, debtAccounts,
-  rankedDestinations, addVisited, scriptureForMonth, bucketById
+  rankedDestinations, addVisited, bucketById
 } from './state.js';
 import {reviewAssignmentTarget, reviewParentBuckets, reviewSuggestedParentId} from './services/reviewAssignment.js';
 import {desktopStartupFailure, desktopVaultScreen, inspectDesktopVault} from './services/desktopStartup.js';
+import {
+  DEVOTIONAL_ERROR_CODES,
+  advanceToNextDevotional,
+  completeDevotional,
+  createDevotionalDraft,
+  getActiveDevotional,
+  getDevotionalHistory,
+  saveDevotionalResponses,
+  toggleSavedDevotional,
+  validateDevotionalDraft
+} from './services/devotionalService.js';
 const isDesktopProtocol = window.location.protocol === 'money-moves:';
 const isDesktop = isDesktopProtocol && Boolean(globalThis.moneyMovesDesktop?.vault);
 const startupFailure = desktopStartupFailure({isDesktopProtocol, hasDesktopBridge:isDesktop});
@@ -56,6 +67,9 @@ let archivingBucketId = null;
 let allocationDraft = null;
 let allocationDraftDirty = false;
 let allocationEditorSource = null;
+let devotionalDraft = null;
+let devotionalDraftDirty = false;
+let devotionalActionBusy = false;
 let reviewChildChooser = null;
 let externalVaultChangeObserved = false;
 let localRecoveryStatus = {encryptedVault:false, encryptedVaultCorrupt:false, legacyState:false};
@@ -132,6 +146,10 @@ function enterApp() {
 // the hosted row, but nothing in memory can decrypt it until the passphrase is
 // re-entered.
 function lockApp() {
+  if (devotionalDraft && !discardDevotionalDraft()) {
+    resetInactivity();
+    return;
+  }
   if (allocationDraft) closeAllocationEditor();
   if (reviewChildChooser) closeReviewChildChooser();
   activeKey=null; keyMeta=null; vaultGeneration=null; state=null;
@@ -143,6 +161,7 @@ function lockApp() {
 
 async function signOutApp() {
   if (allocationDraft && !discardAllocationDraft()) return;
+  if (devotionalDraft && !discardDevotionalDraft()) return;
   activeKey=null; keyMeta=null; vaultGeneration=null; state=null;
   externalVaultChangeObserved=false;
   clearTimeout(inactivityTimer);
@@ -209,10 +228,11 @@ function humanCategory(value) {
 
 function selectScreen(screen) {
   if (allocationDraft && screen !== currentScreen && !discardAllocationDraft()) return;
+  if (currentScreen === 'devotionals' && screen !== currentScreen && devotionalDraft && !discardDevotionalDraft()) return;
   currentScreen=screen;
   document.querySelectorAll('.screen').forEach(node=>node.classList.toggle('active',node.id===`screen-${screen}`));
   document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.screen===screen));
-  const titles={overview:'Overview',review:'Weekly review',buckets:'Buckets & rules',travel:'Travel',debt:'Debt & goals',settings:'Settings & vault'};
+  const titles={overview:'Overview',devotionals:'Faith & Money',review:'Weekly review',buckets:'Buckets & rules',travel:'Travel',debt:'Debt & goals',settings:'Settings & vault'};
   $('screenTitle').textContent=titles[screen]||'Money Moves';
   renderAll();
 }
@@ -253,13 +273,16 @@ function renderOverview() {
     </div>`;
   }).join('') || '<p class="empty-state">No ordinary spending buckets yet. Add one in Buckets & rules; system classifications do not appear in the spending plan.</p>';
 
-  const verse=scriptureForMonth(state);
-  $('scriptureCard').classList.toggle('hidden',!state.preferences.showScripture || !verse);
-  if (verse) {
-    $('scriptureText').textContent=`“${verse.text}”`;
-    $('scriptureReference').textContent=verse.reference;
-    $('scriptureTheme').textContent=verse.theme;
-  }
+  const devotional=getActiveDevotional(state);
+  const history=getDevotionalHistory(state).find(item=>item.devotional.id===devotional.id);
+  $('faithMoneyTitle').textContent=devotional.title;
+  $('faithMoneyVerse').textContent=`“${devotional.verseText}”`;
+  $('faithMoneyReference').textContent=`${devotional.verseReference} · ${devotional.translation}`;
+  $('faithMoneyTheme').textContent=history?.isCompleted
+    ? `${devotional.theme} · Completed — revisit your reflection any time.`
+    : history?.entry ? `${devotional.theme} · Continue your saved reflection when you are ready.` : devotional.theme;
+  $('faithMoneyStatus').textContent=history?.isCompleted ? 'Completed' : history?.entry ? 'In progress' : 'Current';
+  $('openActiveDevotional').textContent=history?.entry && !history?.isCompleted ? 'Continue reflection' : 'Read devotional';
 
   const debts=debtAccounts(state);
   const priority=debts.find(account=>account.utilization!==null) || debts[0];
@@ -276,6 +299,140 @@ function renderOverview() {
     <span>${escapeHtml(account.institution)} · ${account.kind==='credit'?'Credit':'Cash'}</span>
     <strong>${money(account.balance)}</strong><small>${escapeHtml(account.name)}</small>
   </div>`).join('');
+}
+
+function devotionalStatusLabel(item) {
+  if (item.isActive) return item.isCompleted ? 'Current · completed' : item.entry ? 'Current · in progress' : 'Current';
+  if (item.isCompleted && item.isSaved) return 'Completed · saved';
+  if (item.isCompleted) return 'Completed';
+  if (item.isSaved) return 'Saved';
+  if (item.entry) return 'In progress';
+  return 'Not started';
+}
+
+function discardDevotionalDraft() {
+  if (!devotionalDraft) return true;
+  if (devotionalDraftDirty && !confirm('Discard unsaved devotional responses and private notes?')) return false;
+  devotionalDraft=null;
+  devotionalDraftDirty=false;
+  setMessage('devotionalMessage','');
+  return true;
+}
+
+function currentDevotionalDraft() {
+  if (!devotionalDraft) devotionalDraft=createDevotionalDraft(state);
+  return devotionalDraft;
+}
+
+function setDevotionalDraft(devotionalId) {
+  devotionalDraft=createDevotionalDraft(state,devotionalId);
+  devotionalDraftDirty=false;
+  return devotionalDraft;
+}
+
+function showDevotionalError(error) {
+  if (error?.code === 'VAULT_CONFLICT' || error?.code === DEVOTIONAL_ERROR_CODES.STALE_STATE) {
+    showVaultConflict();
+    return 'Your saved vault changed elsewhere. Reload the latest vault before saving this reflection.';
+  }
+  if (error?.code === DEVOTIONAL_ERROR_CODES.PERSISTENCE_FAILED) {
+    return 'Could not save your devotional change. Your previous saved reflection is still intact.';
+  }
+  if (error?.code === DEVOTIONAL_ERROR_CODES.INVALID_RESPONSE || error?.code === DEVOTIONAL_ERROR_CODES.INVALID_PRIVATE_NOTES) {
+    return 'Please keep responses within the displayed character limits before saving.';
+  }
+  return 'This devotional change could not be completed. Your saved reflection was not changed.';
+}
+
+function renderDevotionals() {
+  const draft=currentDevotionalDraft();
+  const history=getDevotionalHistory(state);
+  const item=history.find(candidate=>candidate.devotional.id===draft.devotionalId) || history[0];
+  const devotional=item.devotional;
+  const hasNext=history.some(candidate=>candidate.devotional.sequence===devotional.sequence+1);
+  const canComplete=item.isActive && !item.isCompleted;
+  const canAdvance=item.isActive && item.isCompleted && hasNext;
+  $('devotionalReaderTheme').textContent=devotional.theme.toUpperCase();
+  $('devotionalReaderTitle').textContent=devotional.title;
+  $('devotionalReaderMeta').textContent=`${devotional.estimatedMinutes} minute reflection · ${devotional.translationAttribution}`;
+  $('devotionalReaderProgress').textContent=devotionalStatusLabel(item);
+  $('devotionalVerse').textContent=`“${devotional.verseText}”`;
+  $('devotionalReference').textContent=`${devotional.verseReference} · ${devotional.translation}`;
+  $('devotionalText').innerHTML=devotional.devotionalText.split(/\n\s*\n/)
+    .map(paragraph=>`<p>${escapeHtml(paragraph)}</p>`).join('');
+  $('devotionalClosing').textContent=devotional.optionalClosingReflection || '';
+  $('devotionalClosing').classList.toggle('hidden',!devotional.optionalClosingReflection);
+  $('devotionalPrompts').innerHTML=devotional.prompts.map((prompt,index)=>{
+    const value=draft.promptResponses.find(response=>response.promptId===prompt.id)?.response || '';
+    const inputId=`devotionalPrompt${index+1}`;
+    return `<label class="devotional-prompt" for="${inputId}"><span><b>${index+1}</b>${escapeHtml(prompt.text)}</span><textarea id="${inputId}" data-devotional-prompt="${escapeAttr(prompt.id)}" maxlength="10000" rows="4" placeholder="Optional private response">${escapeHtml(value)}</textarea><small>Up to 10,000 characters</small></label>`;
+  }).join('');
+  $('devotionalPrivateNotes').value=draft.privateNotes;
+  $('saveDevotionalProgress').disabled=devotionalActionBusy;
+  $('toggleSavedDevotional').disabled=devotionalActionBusy;
+  $('completeDevotional').disabled=devotionalActionBusy;
+  $('advanceDevotional').disabled=devotionalActionBusy;
+  $('toggleSavedDevotional').textContent=item.isSaved ? 'Unsave devotional' : 'Save devotional';
+  $('completeDevotional').classList.toggle('hidden',!canComplete);
+  $('advanceDevotional').classList.toggle('hidden',!canAdvance);
+  $('devotionalLibrary').innerHTML=history.map(candidate=>`<button class="devotional-library-item ${candidate.devotional.id===devotional.id?'selected':''}" data-open-devotional="${escapeAttr(candidate.devotional.id)}" aria-current="${candidate.devotional.id===devotional.id?'true':'false'}"><span><strong>${escapeHtml(candidate.devotional.title)}</strong><small>${escapeHtml(candidate.devotional.verseReference)}</small></span><em>${escapeHtml(devotionalStatusLabel(candidate))}</em></button>`).join('');
+  document.querySelectorAll('[data-devotional-prompt]').forEach(input=>input.addEventListener('input',event=>{
+    const response=draft.promptResponses.find(item=>item.promptId===event.currentTarget.dataset.devotionalPrompt);
+    if (response) response.response=event.currentTarget.value;
+    devotionalDraftDirty=true;
+    setMessage('devotionalMessage','Unsaved private changes.');
+  }));
+  $('devotionalPrivateNotes').addEventListener('input',event=>{
+    draft.privateNotes=event.currentTarget.value;
+    devotionalDraftDirty=true;
+    setMessage('devotionalMessage','Unsaved private changes.');
+  });
+  document.querySelectorAll('[data-open-devotional]').forEach(button=>button.addEventListener('click',()=>{
+    const nextId=button.dataset.openDevotional;
+    if (nextId===draft.devotionalId) return;
+    if (!discardDevotionalDraft()) return;
+    setDevotionalDraft(nextId);
+    renderDevotionals();
+    $('devotionalReaderTitle').focus({preventScroll:true});
+  }));
+}
+
+function openDevotionalReader(devotionalId = getActiveDevotional(state).id) {
+  if (currentScreen === 'devotionals' && devotionalDraft?.devotionalId !== devotionalId && !discardDevotionalDraft()) return;
+  setDevotionalDraft(devotionalId);
+  selectScreen('devotionals');
+  renderDevotionals();
+  $('devotionalReaderTitle').focus({preventScroll:true});
+}
+
+async function saveOpenDevotionalDraft({message = 'Progress saved privately in your encrypted vault.'} = {}) {
+  const draft=currentDevotionalDraft();
+  const validation=validateDevotionalDraft(state,draft);
+  if (!validation.ok) {
+    setMessage('devotionalMessage','Please keep responses within the displayed character limits before saving.',true);
+    return false;
+  }
+  await saveDevotionalResponses(state,draft,persist,{now:()=>new Date().toISOString()});
+  setDevotionalDraft(draft.devotionalId);
+  devotionalDraftDirty=false;
+  renderAll();
+  setMessage('devotionalMessage',message);
+  return true;
+}
+
+async function runDevotionalAction(action) {
+  if (devotionalActionBusy) return;
+  devotionalActionBusy=true;
+  renderDevotionals();
+  try {
+    await action();
+  } catch (error) {
+    renderAll();
+    setMessage('devotionalMessage',showDevotionalError(error),true);
+  } finally {
+    devotionalActionBusy=false;
+    renderDevotionals();
+  }
 }
 
 function renderReview() {
@@ -692,6 +849,7 @@ function renderAll() {
   const totalRemaining=state.review.transactions.filter(tx=>tx.reviewStatus!=='reviewed').length;
   $('navReviewCount').textContent=totalRemaining;
   renderOverview();
+  renderDevotionals();
   renderReview();
   renderBuckets();
   renderTravel();
@@ -803,6 +961,37 @@ function bindEvents() {
   });
   $('signOutNow').addEventListener('click',()=>{signOutApp();});
   document.querySelectorAll('.nav-item').forEach(button=>button.addEventListener('click',()=>selectScreen(button.dataset.screen)));
+  $('openActiveDevotional').addEventListener('click',()=>openDevotionalReader());
+  $('returnToOverview').addEventListener('click',()=>selectScreen('overview'));
+  $('saveDevotionalProgress').addEventListener('click',()=>runDevotionalAction(async()=>{
+    await saveOpenDevotionalDraft();
+  }));
+  $('toggleSavedDevotional').addEventListener('click',()=>runDevotionalAction(async()=>{
+    if (devotionalDraftDirty && !await saveOpenDevotionalDraft({message:''})) return;
+    const draft=currentDevotionalDraft();
+    await toggleSavedDevotional(state,{expectedRevision:draft.expectedRevision,devotionalId:draft.devotionalId},persist,{now:()=>new Date().toISOString()});
+    setDevotionalDraft(draft.devotionalId);
+    renderAll();
+    setMessage('devotionalMessage','Devotional library status saved.');
+  }));
+  $('completeDevotional').addEventListener('click',()=>runDevotionalAction(async()=>{
+    if (devotionalDraftDirty && !await saveOpenDevotionalDraft({message:''})) return;
+    const draft=currentDevotionalDraft();
+    await completeDevotional(state,{expectedRevision:draft.expectedRevision,devotionalId:draft.devotionalId},persist,{now:()=>new Date().toISOString()});
+    setDevotionalDraft(draft.devotionalId);
+    renderAll();
+    setMessage('devotionalMessage','Devotional marked complete. Continue when you are ready.');
+  }));
+  $('advanceDevotional').addEventListener('click',()=>runDevotionalAction(async()=>{
+    if (devotionalDraftDirty && !await saveOpenDevotionalDraft({message:''})) return;
+    const draft=currentDevotionalDraft();
+    const result=await advanceToNextDevotional(state,{expectedRevision:draft.expectedRevision,devotionalId:draft.devotionalId},persist,{now:()=>new Date().toISOString()});
+    if (!result.hasNext) return;
+    setDevotionalDraft(result.nextDevotionalId);
+    renderAll();
+    setMessage('devotionalMessage','Your next devotional is ready when you are.');
+    $('devotionalReaderTitle').focus({preventScroll:true});
+  }));
   $('monthSelect').addEventListener('change',async()=>{try{await applyCanonicalChange(()=>{state.monthly.selectedMonth=$('monthSelect').value;});renderAll();}catch(error){alert(error.message);renderAll();}});
   $('weekSelect').addEventListener('change',async()=>{try{await applyCanonicalChange(()=>{state.review.selectedWeek=$('weekSelect').value;});renderReview();}catch(error){alert(error.message);renderReview();}});
   $('lockNow').addEventListener('click',()=>{if(discardAllocationDraft())lockApp();});
@@ -816,7 +1005,7 @@ function bindEvents() {
   $('cancelAllocationEditor').addEventListener('click',discardAllocationDraft);
   $('saveAllocationEditor').addEventListener('click',saveOpenAllocationDraft);
   $('cancelReviewChildChooser').addEventListener('click',closeReviewChildChooser);
-  window.addEventListener('beforeunload',event=>{if(allocationDraftDirty){event.preventDefault();event.returnValue='';}});
+  window.addEventListener('beforeunload',event=>{if(allocationDraftDirty || devotionalDraftDirty){event.preventDefault();event.returnValue='';}});
   document.addEventListener('keydown',event=>{
     if (event.key!=='Escape') return;
     if (reviewChildChooser) closeReviewChildChooser();
@@ -933,6 +1122,7 @@ function bindEvents() {
   $('dismissVaultConflict').addEventListener('click',hideVaultConflict);
   $('reloadVaultAfterConflict').addEventListener('click',()=>{
     if (allocationDraftDirty && !confirm('Reloading will discard the unsaved allocation draft. Continue?')) return;
+    if (devotionalDraftDirty && !confirm('Reloading will discard unsaved devotional responses and private notes. Continue?')) return;
     lockApp();
     setMessage('lockMessage','Enter your passphrase to load the latest vault.');
   });
@@ -946,6 +1136,7 @@ function bindEvents() {
 async function routeAfterAuthChange(session) {
   if (state && browserRuntime.mustClearUnlockedVault(currentSession, session)) {
     if (allocationDraft) closeAllocationEditor();
+    devotionalDraft=null; devotionalDraftDirty=false;
     activeKey=null; keyMeta=null; vaultGeneration=null; state=null;
     externalVaultChangeObserved=false;
     clearTimeout(inactivityTimer);
@@ -953,7 +1144,7 @@ async function routeAfterAuthChange(session) {
   }
   currentSession = session;
   if (!session) {
-    if (state) { activeKey=null; keyMeta=null; vaultGeneration=null; state=null; clearTimeout(inactivityTimer); }
+    if (state) { devotionalDraft=null; devotionalDraftDirty=false; activeKey=null; keyMeta=null; vaultGeneration=null; state=null; clearTimeout(inactivityTimer); }
     showPanel('signin');
     return;
   }
