@@ -36,6 +36,11 @@ export function createFakeVaultsTable() {
         // reflects the committed write; the promise still rejects.
         return Promise.reject(new Error('simulated network failure after the write was committed'));
       }
+      if (mode === 'malformed-response') {
+        // The database applied the mutation but a proxy/client returned an
+        // acknowledgement that cannot be trusted. Production must reconcile.
+        return Promise.resolve({data: [{generation: 'untrusted-response'}], error: null});
+      }
       return Promise.resolve(result);
     }
 
@@ -46,6 +51,15 @@ export function createFakeVaultsTable() {
         }
       },
       from(table) {
+        if (table === 'plaid_secrets') {
+          // RLS is enabled with no browser policy for this future-only table.
+          return {
+            select() { return {eq() { return {async maybeSingle() { return {data:null, error:null}; }}; }}; },
+            insert() { return {select: async () => ({data:null, error:{code:'42501'}})}; },
+            update() { return {eq() { return {select: async () => ({data:[], error:null})}; }}; },
+            delete() { return {eq() { return {select: async () => ({data:[], error:null})}; }}; }
+          };
+        }
         if (table !== 'vaults') throw new Error(`fake client only supports the vaults table, got "${table}"`);
         return {
           select() {
@@ -54,7 +68,7 @@ export function createFakeVaultsTable() {
                 if (key !== 'user_id') throw new Error('fake only supports .eq("user_id", ...) for select');
                 return {
                   async maybeSingle() {
-                    const row = rows.get(value);
+                    const row = userId && value === userId ? rows.get(value) : null;
                     return {data: row ? {generation: row.generation, blob: row.blob} : null, error: null};
                   }
                 };
@@ -64,6 +78,7 @@ export function createFakeVaultsTable() {
           insert(record) {
             return {
               select: () => runWrite(() => {
+                if (!userId || record.user_id !== userId) return {data: null, error: {code:'42501'}};
                 if (rows.has(record.user_id)) {
                   return {data: null, error: {message: 'duplicate key value violates unique constraint "vaults_pkey"'}};
                 }
@@ -79,7 +94,7 @@ export function createFakeVaultsTable() {
               select: () => runWrite(() => {
                 const userIdFilter = filters.find(([key]) => key === 'user_id');
                 const generationFilter = filters.find(([key]) => key === 'generation');
-                const row = userIdFilter ? rows.get(userIdFilter[1]) : undefined;
+                const row = userId && userIdFilter?.[1] === userId ? rows.get(userIdFilter[1]) : undefined;
                 if (!row || (generationFilter && row.generation !== generationFilter[1])) {
                   return {data: [], error: null}; // WHERE matched nothing: definite conflict
                 }
@@ -88,6 +103,11 @@ export function createFakeVaultsTable() {
               })
             };
             return builder;
+          },
+          delete() {
+            // `vaults` deliberately has no DELETE policy. Even its owner gets no
+            // matching row through the browser role.
+            return {eq() { return {select: async () => ({data:[], error:null})}; }};
           }
         };
       }

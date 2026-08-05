@@ -1,6 +1,14 @@
 import {migrateState, validateFoundationDomain} from '../domain/migrations.js';
 import {getStateRevision} from './stateRevision.js';
 
+export class LocalVaultAdoptionConflictError extends Error {
+  constructor() {
+    super('A hosted vault already exists for this account. Money Moves will not overwrite either vault automatically.');
+    this.name = 'LocalVaultAdoptionConflictError';
+    this.code = 'LOCAL_VAULT_ADOPTION_CONFLICT';
+  }
+}
+
 function sameState(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -25,6 +33,33 @@ export function createStateService({repository, seed, migrate = migrateState} = 
     },
     readLegacyState() {
       return repository.readLegacyState();
+    },
+    localRecoveryStatus() {
+      let encryptedVault = false;
+      let encryptedVaultCorrupt = false;
+      try { encryptedVault = Boolean(repository.readLocalV1Record()); }
+      catch { encryptedVaultCorrupt = true; }
+      return {
+        encryptedVault,
+        encryptedVaultCorrupt,
+        legacyState:Boolean(repository.readLegacyState())
+      };
+    },
+    async adoptLocalVault(passphrase, options = {}) {
+      const local = repository.readLocalV1Record();
+      if (!local) throw new Error('No encrypted local recovery vault was found in this browser.');
+      if (await repository.hasVault()) throw new LocalVaultAdoptionConflictError();
+      const verified = await repository.verifyBackup(local.raw, passphrase);
+      const migration = migrateForUse(verified.state);
+      // create() is still insert-if-absent at the hosted boundary, so a second
+      // device winning this race produces a conflict rather than an overwrite.
+      const created = await repository.create(migration.state, passphrase, options.coordination);
+      return {...created, state:migration.state, migration, preservedLocalRecovery:true};
+    },
+    exportLocalEncryptedRecovery() {
+      const local = repository.readLocalV1Record();
+      if (!local) throw new Error('No encrypted local recovery vault was found in this browser.');
+      return local.raw;
     },
     async create(passphrase, initialState = seed, options = {}) {
       const migration = migrateForUse(initialState);
@@ -67,9 +102,12 @@ export function createStateService({repository, seed, migrate = migrateState} = 
       const expected = expectedVaultGeneration ?? await repository.readVaultGeneration();
       const verified = await repository.verifyBackup(raw, passphrase);
       const migration = migrateForUse(verified.state);
+      const current = await repository.readVaultMetadata();
+      const nextVaultSequence = current?.vaultSequence == null ? undefined : current.vaultSequence + 1;
       // save() writes the V2 vault only after decryption and migration validation have both succeeded.
       const saved = await repository.save(migration.state, verified.key, verified.meta, {
         expectedVaultGeneration:expected,
+        nextVaultSequence,
         ...coordination
       });
       return {...verified, ...saved, state:migration.state, migration};

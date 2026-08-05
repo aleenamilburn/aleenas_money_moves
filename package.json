@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node --check js/app.js && node --check js/state.js && node --check js/vault.js && node --check js/domain/models.js && node --check js/domain/migrations.js && node --check js/services/stateRevision.js && node --check js/services/reimbursementService.js && node --check js/services/allocationService.js && node --check js/services/bucketService.js && node --check js/services/vaultRepository.js && node --check js/services/stateService.js && node --check js/services/authService.js && node --check js/services/hostedVaultStorage.js && node --check js/services/supabaseClient.js",
+    "check": "node --check js/app.js && node --check js/state.js && node --check js/vault.js && node --check js/domain/models.js && node --check js/domain/migrations.js && node --check js/services/stateRevision.js && node --check js/services/reimbursementService.js && node --check js/services/allocationService.js && node --check js/services/bucketService.js && node --check js/services/vaultRepository.js && node --check js/services/stateService.js && node --check js/services/authService.js && node --check js/services/hostedVaultStorage.js && node --check js/services/supabaseClient.js && node --check js/services/sessionSafety.js",
     "vendor:supabase": "esbuild node_modules/@supabase/supabase-js/dist/index.mjs --bundle --format=esm --platform=browser --target=es2022 --minify --outfile=js/vendor/supabase-js/index.mjs"
   },
   "devDependencies": {

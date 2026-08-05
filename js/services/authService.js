@@ -8,8 +8,8 @@ export const AUTH_PROVIDERS = Object.freeze({
 });
 
 export class AuthServiceError extends Error {
-  constructor(message) {
-    super(message || 'Sign-in failed.');
+  constructor(message = 'Sign-in could not be completed. Please try again.') {
+    super(message);
     this.name = 'AuthServiceError';
     this.code = 'AUTH_FAILED';
   }
@@ -17,20 +17,30 @@ export class AuthServiceError extends Error {
 
 export async function signInWithProvider(providerKey, {redirectTo} = {}) {
   const provider = AUTH_PROVIDERS[providerKey];
-  if (!provider) throw new AuthServiceError(`Unknown sign-in provider: ${providerKey}`);
+  if (!provider) throw new AuthServiceError('This sign-in method is not available.');
   const supabase = getSupabaseClient();
-  const {error} = await supabase.auth.signInWithOAuth({
-    provider,
-    options: {redirectTo: redirectTo || globalThis.location.origin}
-  });
-  if (error) throw new AuthServiceError(error.message);
+  try {
+    const {error} = await supabase.auth.signInWithOAuth({
+      provider,
+      options: {redirectTo: redirectTo || globalThis.location.origin}
+    });
+    if (error) throw new AuthServiceError();
+  } catch (error) {
+    if (error instanceof AuthServiceError) throw error;
+    throw new AuthServiceError();
+  }
 }
 
 export async function getCurrentSession() {
   const supabase = getSupabaseClient();
-  const {data, error} = await supabase.auth.getSession();
-  if (error) throw new AuthServiceError(error.message);
-  return data.session || null;
+  try {
+    const {data, error} = await supabase.auth.getSession();
+    if (error) throw new AuthServiceError();
+    return data.session || null;
+  } catch (error) {
+    if (error instanceof AuthServiceError) throw error;
+    throw new AuthServiceError();
+  }
 }
 
 export async function getCurrentUserId() {
@@ -46,6 +56,11 @@ export function onAuthStateChange(callback) {
 
 export async function signOut() {
   const supabase = getSupabaseClient();
-  const {error} = await supabase.auth.signOut();
-  if (error) throw new AuthServiceError(error.message);
+  try {
+    const {error} = await supabase.auth.signOut();
+    if (error) throw new AuthServiceError('Sign-out could not be completed. Your vault remains locked in this browser.');
+  } catch (error) {
+    if (error instanceof AuthServiceError) throw error;
+    throw new AuthServiceError('Sign-out could not be completed. Your vault remains locked in this browser.');
+  }
 }

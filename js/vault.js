@@ -15,6 +15,8 @@ import {
 const KDF_ITERATIONS = 600000;
 const NO_VAULT_GENERATION = 'mmvg:none';
 const GENERATION_PATTERN = /^mmvg:(?:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|none)$/i;
+const VAULT_BINDING_VERSION = 'generation-v1';
+const LOCAL_CHECKPOINT_PREFIX = 'money-moves-hosted-vault-checkpoint-v1:';
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -51,6 +53,17 @@ export class VaultAuthRequiredError extends Error {
     super('Sign in to reach your encrypted vault.');
     this.name = 'VaultAuthRequiredError';
     this.code = 'VAULT_AUTH_REQUIRED';
+  }
+}
+
+// The encrypted envelope and the authoritative hosted metadata must agree before
+// a vault can be opened. This remains deliberately generic: revealing which field
+// was malformed would make a damaged or replayed record easier to probe.
+export class VaultIntegrityError extends Error {
+  constructor() {
+    super('The encrypted vault metadata could not be verified.');
+    this.name = 'VaultIntegrityError';
+    this.code = 'VAULT_INTEGRITY_FAILED';
   }
 }
 
@@ -108,6 +121,70 @@ function createGeneration(options = {}) {
   return generation;
 }
 
+function assertVaultSequence(value) {
+  if (!Number.isSafeInteger(value) || value < 1) throw new VaultIntegrityError();
+  return value;
+}
+
+function nextVaultSequence(meta, requestedSequence) {
+  if (requestedSequence !== undefined) return assertVaultSequence(requestedSequence);
+  if (meta?.vaultSequence == null) return 1;
+  const current = assertVaultSequence(meta.vaultSequence);
+  if (current >= Number.MAX_SAFE_INTEGER) throw new VaultIntegrityError();
+  return current + 1;
+}
+
+function boundVaultAad(vaultGeneration, vaultSequence) {
+  return `${V2_VAULT_AAD}|generation:${assertVaultGeneration(vaultGeneration)}|sequence:${assertVaultSequence(vaultSequence)}`;
+}
+
+function checkpointStorageKey(userId) {
+  return `${LOCAL_CHECKPOINT_PREFIX}${encodeURIComponent(userId)}`;
+}
+
+function readCheckpoint(userId) {
+  try {
+    const raw = localStorage.getItem(checkpointStorageKey(userId));
+    if (!raw) return null;
+    const checkpoint = JSON.parse(raw);
+    if (checkpoint?.userId !== userId) return null;
+    return {
+      generation:assertVaultGeneration(checkpoint.generation),
+      sequence:assertVaultSequence(checkpoint.sequence)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function assertCheckpointNotRolledBack(userId, vault) {
+  if (vault?.cipher?.binding !== VAULT_BINDING_VERSION) return;
+  const generation = assertVaultGeneration(vault.vaultGeneration);
+  const sequence = assertVaultSequence(vault.vaultSequence);
+  const checkpoint = readCheckpoint(userId);
+  if (!checkpoint) return;
+  if (sequence < checkpoint.sequence || (sequence === checkpoint.sequence && generation !== checkpoint.generation)) {
+    throw new VaultIntegrityError();
+  }
+}
+
+function confirmCheckpoint(userId, vault) {
+  if (vault?.cipher?.binding !== VAULT_BINDING_VERSION) return;
+  try {
+    const generation = assertVaultGeneration(vault.vaultGeneration);
+    const sequence = assertVaultSequence(vault.vaultSequence);
+    const checkpoint = readCheckpoint(userId);
+    if (checkpoint && (sequence < checkpoint.sequence || (sequence === checkpoint.sequence && generation !== checkpoint.generation))) {
+      throw new VaultIntegrityError();
+    }
+    localStorage.setItem(checkpointStorageKey(userId), JSON.stringify({userId, generation, sequence}));
+  } catch (error) {
+    // A local checkpoint is a rollback alarm, not another persistence authority.
+    // If browser storage is unavailable, a verified hosted save must remain usable.
+    if (error instanceof VaultIntegrityError) throw error;
+  }
+}
+
 function assertVaultGeneration(value) {
   if (typeof value !== 'string' || !GENERATION_PATTERN.test(value)) throw new VaultGenerationError();
   return value;
@@ -124,13 +201,16 @@ export async function deriveKey(passphrase,salt,iterations=KDF_ITERATIONS) {
 }
 
 function aadForVault(vault) {
+  if (vault?.cipher?.binding === VAULT_BINDING_VERSION) return boundVaultAad(vault.vaultGeneration, vault.vaultSequence);
   return vault?.cipher?.aad || (vault?.version === 1 ? V1_VAULT_AAD : V2_VAULT_AAD);
 }
 
-async function encryptState(state,key,meta,{vaultGeneration = null} = {}) {
+async function encryptState(state,key,meta,{vaultGeneration = null, vaultSequence = null} = {}) {
+  if (vaultGeneration === null || vaultSequence === null) throw new VaultIntegrityError();
+  const aad = boundVaultAad(vaultGeneration, vaultSequence);
   const iv=crypto.getRandomValues(new Uint8Array(12));
   const ciphertext=await crypto.subtle.encrypt(
-    {name:'AES-GCM',iv,additionalData:encoder.encode(V2_VAULT_AAD)},
+    {name:'AES-GCM',iv,additionalData:encoder.encode(aad)},
     key,encoder.encode(JSON.stringify(state))
   );
   const vault = {
@@ -140,9 +220,10 @@ async function encryptState(state,key,meta,{vaultGeneration = null} = {}) {
     createdAt:meta.createdAt || new Date().toISOString(),
     updatedAt:new Date().toISOString(),
     kdf:{name:'PBKDF2',hash:'SHA-256',iterations:meta.iterations||KDF_ITERATIONS,salt:bytesToBase64(meta.salt)},
-    cipher:{name:'AES-GCM',iv:bytesToBase64(iv),aad:V2_VAULT_AAD,ciphertext:bytesToBase64(new Uint8Array(ciphertext))}
+    cipher:{name:'AES-GCM',iv:bytesToBase64(iv),aad,binding:VAULT_BINDING_VERSION,ciphertext:bytesToBase64(new Uint8Array(ciphertext))},
+    vaultGeneration:assertVaultGeneration(vaultGeneration),
+    vaultSequence:assertVaultSequence(vaultSequence)
   };
-  if (vaultGeneration !== null) vault.vaultGeneration = assertVaultGeneration(vaultGeneration);
   return vault;
 }
 
@@ -154,12 +235,21 @@ async function decryptState(vault,key) {
   return JSON.parse(decoder.decode(plain));
 }
 
+async function decryptVerifiedVault(vault, key) {
+  try {
+    return await decryptState(vault, key);
+  } catch {
+    throw new VaultIntegrityError();
+  }
+}
+
 function metaFromVault(vault) {
   return {
     createdAt:vault.createdAt,
     iterations:vault.kdf.iterations,
     salt:base64ToBytes(vault.kdf.salt),
-    vaultGeneration:vault.vaultGeneration || null
+    vaultGeneration:vault.vaultGeneration || null,
+    vaultSequence:vault.vaultSequence ?? null
   };
 }
 
@@ -215,6 +305,7 @@ async function writeCoordinated(vault, key, {expectedVaultGeneration, operation 
       const written = isCreate
         ? await createHostedRow({generation: vault.vaultGeneration, blob: vault})
         : await updateHostedRow({expectedGeneration: expectedVaultGeneration, nextGeneration: vault.vaultGeneration, blob: vault});
+      confirmCheckpoint(written.userId, vault);
       if (typeof options.afterNetworkWrite === 'function') await options.afterNetworkWrite();
       return {meta: metaFromVault(vault), vaultGeneration: written.generation};
     } catch (error) {
@@ -231,11 +322,20 @@ export async function readVaultRecord() {
     throw mapHostedError(error, 'read');
   }
   if (!hostedRow) return null;
+  try {
+    if (!hostedRow.blob || hostedRow.blob.vaultGeneration !== hostedRow.generation) throw new VaultIntegrityError();
+    if (hostedRow.blob.cipher?.binding === VAULT_BINDING_VERSION) assertVaultSequence(hostedRow.blob.vaultSequence);
+    assertCheckpointNotRolledBack(hostedRow.userId, hostedRow.blob);
+  } catch (error) {
+    if (error instanceof VaultIntegrityError) throw error;
+    throw new VaultIntegrityError();
+  }
   return {
     exists:true,
     vault:hostedRow.blob,
     raw:JSON.stringify(hostedRow.blob),
     storageKey:'hosted:vaults',
+    ownerId:hostedRow.userId,
     isLegacy:false,
     isTemporary:false
   };
@@ -255,6 +355,13 @@ export async function readVaultGeneration() {
   return record ? record.vault.vaultGeneration : NO_VAULT_GENERATION;
 }
 
+export async function readVaultMetadata() {
+  const record = await readVaultRecord();
+  if (!record) return null;
+  const meta = metaFromVault(record.vault);
+  return {vaultGeneration:meta.vaultGeneration, vaultSequence:meta.vaultSequence};
+}
+
 export async function createVault(state,passphrase,options = {}) {
   const existing = await readVaultRecord();
   if (existing) throw new VaultConflictError('create');
@@ -262,7 +369,7 @@ export async function createVault(state,passphrase,options = {}) {
   const key=await deriveKey(passphrase,salt);
   const meta={createdAt:new Date().toISOString(),iterations:KDF_ITERATIONS,salt};
   const generation = createGeneration(options);
-  const vault=await encryptState(state,key,meta,{vaultGeneration:generation});
+  const vault=await encryptState(state,key,meta,{vaultGeneration:generation,vaultSequence:1});
   const written = await writeCoordinated(vault,key,{...options, expectedVaultGeneration:NO_VAULT_GENERATION, operation:'create', isCreate:true});
   return {state,key,meta:written.meta,vaultGeneration:written.vaultGeneration,sourceStorageKey:'hosted:vaults',needsVaultMigration:false};
 }
@@ -270,18 +377,26 @@ export async function createVault(state,passphrase,options = {}) {
 export async function unlock(passphrase) {
   const record=await readVaultRecord();
   if (!record) throw new Error('No encrypted vault exists.');
-  assertSupportedVault(record.vault);
-  const meta=metaFromVault(record.vault);
-  const key=await deriveKey(passphrase,meta.salt,meta.iterations);
-  const state=await decryptState(record.vault,key);
-  const needsVaultMigration=record.vault.version !== 2 || record.vault.product !== PRODUCT_NAME;
+  let meta, key, state;
+  try {
+    assertSupportedVault(record.vault);
+    meta=metaFromVault(record.vault);
+    key=await deriveKey(passphrase,meta.salt,meta.iterations);
+    state=await decryptVerifiedVault(record.vault,key);
+  } catch (error) {
+    if (error instanceof VaultIntegrityError) throw error;
+    throw new VaultIntegrityError();
+  }
+  confirmCheckpoint(record.ownerId, record.vault);
+  const needsVaultMigration=record.vault.version !== 2 || record.vault.product !== PRODUCT_NAME || record.vault.cipher?.binding !== VAULT_BINDING_VERSION;
   return {state,key,meta,vaultGeneration:meta.vaultGeneration,sourceStorageKey:record.storageKey,needsVaultMigration};
 }
 
 export async function saveVault(state,key,meta,{expectedVaultGeneration = meta?.vaultGeneration, ...options} = {}) {
   assertVaultGeneration(expectedVaultGeneration);
   const generation = createGeneration(options);
-  const vault=await encryptState(state,key,meta,{vaultGeneration:generation});
+  const vaultSequence = nextVaultSequence(meta, options.nextVaultSequence);
+  const vault=await encryptState(state,key,meta,{vaultGeneration:generation,vaultSequence});
   return writeCoordinated(vault,key,{...options, expectedVaultGeneration, operation:'save', isCreate:false});
 }
 
@@ -289,16 +404,23 @@ export async function changePassphrase(state,currentPassphrase,newPassphrase,{ex
   assertVaultGeneration(expectedVaultGeneration);
   const currentRecord=await readVaultRecord();
   if (!currentRecord) throw new Error('No vault found.');
-  assertSupportedVault(currentRecord.vault);
-  if (currentRecord.vault.vaultGeneration !== expectedVaultGeneration) throw new VaultConflictError('change-passphrase');
-  const currentMeta=metaFromVault(currentRecord.vault);
-  const currentKey=await deriveKey(currentPassphrase,currentMeta.salt,currentMeta.iterations);
-  await decryptState(currentRecord.vault,currentKey);
+  let currentMeta;
+  try {
+    assertSupportedVault(currentRecord.vault);
+    if (currentRecord.vault.vaultGeneration !== expectedVaultGeneration) throw new VaultConflictError('change-passphrase');
+    currentMeta=metaFromVault(currentRecord.vault);
+    const currentKey=await deriveKey(currentPassphrase,currentMeta.salt,currentMeta.iterations);
+    await decryptVerifiedVault(currentRecord.vault,currentKey);
+  } catch (error) {
+    if (error instanceof VaultIntegrityError || error instanceof VaultConflictError) throw error;
+    throw new VaultIntegrityError();
+  }
   const salt=crypto.getRandomValues(new Uint8Array(16));
   const key=await deriveKey(newPassphrase,salt);
   const meta={createdAt:currentRecord.vault.createdAt,iterations:KDF_ITERATIONS,salt};
   const generation = createGeneration(options);
-  const next=await encryptState(state,key,meta,{vaultGeneration:generation});
+  const vaultSequence = nextVaultSequence(currentMeta, options.nextVaultSequence);
+  const next=await encryptState(state,key,meta,{vaultGeneration:generation,vaultSequence});
   const written=await writeCoordinated(next,key,{...options, expectedVaultGeneration, operation:'change-passphrase', isCreate:false});
   return {key,meta:written.meta,vaultGeneration:written.vaultGeneration};
 }
@@ -310,11 +432,17 @@ export async function exportEncryptedBackup() {
 }
 
 export async function verifyBackup(raw,passphrase) {
-  const vault=JSON.parse(raw);
-  assertSupportedVault(vault);
-  const meta=metaFromVault(vault);
-  const key=await deriveKey(passphrase,meta.salt,meta.iterations);
-  const state=await decryptState(vault,key);
+  let vault, meta, key, state;
+  try {
+    vault=JSON.parse(raw);
+    assertSupportedVault(vault);
+    meta=metaFromVault(vault);
+    key=await deriveKey(passphrase,meta.salt,meta.iterations);
+    state=await decryptVerifiedVault(vault,key);
+  } catch (error) {
+    if (error instanceof VaultIntegrityError) throw error;
+    throw new VaultIntegrityError();
+  }
   return {vault,state,key,meta,vaultGeneration:meta.vaultGeneration,needsVaultMigration:vault.version !== 2 || vault.product !== PRODUCT_NAME};
 }
 

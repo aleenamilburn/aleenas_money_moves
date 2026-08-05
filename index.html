@@ -27,14 +27,23 @@
         <p class="eyebrow">FIRST LAUNCH</p>
         <h1>Create your encrypted money vault</h1>
         <p>Your passphrase protects budgets, transactions, rules, goals, and travel history. It cannot be recovered.</p>
+        <p id="localRecoveryDisclosure" class="fine-print hidden"></p>
         <label>Passphrase<input id="newPass" type="password" minlength="12" autocomplete="new-password" placeholder="At least 12 characters"></label>
         <label>Confirm passphrase<input id="confirmPass" type="password" minlength="12" autocomplete="new-password"></label>
         <button class="primary wide-button" id="createVault">Create vault</button>
+        <section id="localAdoptionPanel" class="hidden">
+          <p class="eyebrow">LOCAL RECOVERY</p>
+          <p>This browser has an older encrypted Money Moves vault. Adopting it validates and migrates that vault locally, then uploads one newly encrypted hosted copy. The local recovery copy is not deleted or overwritten.</p>
+          <label>Existing local-vault passphrase<input id="localAdoptionPass" type="password" autocomplete="current-password"></label>
+          <button class="primary wide-button" id="adoptLocalVault">Adopt local vault</button>
+          <button class="wide-button" id="downloadLocalRecovery">Download local recovery copy</button>
+        </section>
       </section>
       <section id="unlockPanel" class="lock-panel hidden">
         <p class="eyebrow">VAULT LOCKED</p>
         <h1>Welcome back</h1>
         <p>Enter your passphrase to decrypt your data.</p>
+        <p id="localRecoveryNotice" class="fine-print hidden"></p>
         <label>Passphrase<input id="unlockPass" type="password" autocomplete="current-password"></label>
         <button class="primary wide-button" id="unlockVault">Unlock</button>
       </section>

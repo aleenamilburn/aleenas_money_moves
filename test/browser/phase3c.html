@@ -1,42 +1,8 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Money Moves Phase 3C Test Harness</title></head>
+<head><meta charset="utf-8"><title>Money Moves Phase 3C Harness Retired</title></head>
 <body>
-  <h1>Money Moves Phase 3C Test Harness</h1>
-  <p>This page is test-only and is not linked from production navigation.</p>
-  <label>Test passphrase <input id="testPassphrase" type="password"></label>
-  <label>Synthetic payer label <input id="testPayerLabel" value="Synthetic writer"></label>
-  <div>
-    <button id="installFixture">Install claimed fixture</button>
-    <button id="installUnclaimedFixture">Install unclaimed fixture</button>
-    <button id="openSession">Open session</button>
-    <button id="inspectSession">Inspect session</button>
-    <button id="commitClaimLabel">Commit claim label</button>
-    <button id="inspectEncrypted">Inspect encrypted fixture</button>
-    <button id="installExpiredLease">Install expired lease</button>
-    <button id="runTemporaryConflict">Run temporary-write conflict</button>
-    <button id="removeFixture">Remove fixture</button>
-  </div>
-  <output id="harnessStatus">Loading fixture module…</output>
-  <script src="../../data.js"></script>
-  <script type="module">
-    import * as fixture from './phase3c-fixture.js';
-    const status = document.getElementById('harnessStatus');
-    const passphrase = () => document.getElementById('testPassphrase').value;
-    const run = async operation => {
-      try { status.textContent = JSON.stringify(await operation()); }
-      catch (error) { status.textContent = JSON.stringify({error:error.message, code:error.code || null}); }
-    };
-    document.getElementById('installFixture').addEventListener('click', () => run(() => fixture.installClaimedAllocationFixture(passphrase())));
-    document.getElementById('installUnclaimedFixture').addEventListener('click', () => run(() => fixture.installUnclaimedAllocationFixture(passphrase())));
-    document.getElementById('openSession').addEventListener('click', () => run(() => fixture.openTestSession(passphrase())));
-    document.getElementById('inspectSession').addEventListener('click', () => run(() => fixture.inspectTestSession()));
-    document.getElementById('commitClaimLabel').addEventListener('click', () => run(() => fixture.commitSyntheticClaimLabel(document.getElementById('testPayerLabel').value)));
-    document.getElementById('inspectEncrypted').addEventListener('click', () => run(() => fixture.inspectEncryptedFixture(passphrase())));
-    document.getElementById('installExpiredLease').addEventListener('click', () => run(() => fixture.installExpiredSyntheticLease()));
-    document.getElementById('runTemporaryConflict').addEventListener('click', () => run(() => fixture.runTemporaryWriteConflict(passphrase())));
-    document.getElementById('removeFixture').addEventListener('click', () => run(() => fixture.removeFixture()));
-    status.textContent = 'Fixture module ready.';
-  </script>
+  <h1>Phase 3C harness retired</h1>
+  <p>The localStorage lease fixture was retired with hosted encrypted storage. Use <a href="./hosted-storage.html">the hosted synthetic storage harness</a>.</p>
 </body>
 </html>

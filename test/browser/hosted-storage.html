@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Money Moves Hosted Storage Test Harness</title></head>
+<body>
+  <h1>Money Moves Hosted Storage Test Harness</h1>
+  <p>This synthetic, test-only page is not linked from production navigation and never contacts Supabase.</p>
+  <label>Test passphrase <input id="testPassphrase" type="password"></label>
+  <div>
+    <button id="installFixture">Install synthetic hosted fixture</button>
+    <button id="savePrimary">Save from primary device</button>
+    <button id="saveStale">Attempt stale-device save</button>
+    <button id="reloadPrimary">Reload primary device</button>
+    <button id="inspectRow">Inspect encrypted row shape</button>
+  </div>
+  <output id="harnessStatus">Loading fixture module…</output>
+  <script type="module">
+    import * as fixture from './hosted-storage-fixture.js';
+    const status = document.getElementById('harnessStatus');
+    const passphrase = () => document.getElementById('testPassphrase').value;
+    const run = async operation => {
+      try { status.textContent = JSON.stringify(await operation()); }
+      catch (error) { status.textContent = JSON.stringify({error:'Synthetic hosted harness operation failed.', code:error.code || null}); }
+    };
+    document.getElementById('installFixture').addEventListener('click', () => run(() => fixture.installHostedFixture(passphrase())));
+    document.getElementById('savePrimary').addEventListener('click', () => run(() => fixture.saveFromPrimary()));
+    document.getElementById('saveStale').addEventListener('click', () => run(() => fixture.attemptStaleSave()));
+    document.getElementById('reloadPrimary').addEventListener('click', () => run(() => fixture.reloadPrimary(passphrase())));
+    document.getElementById('inspectRow').addEventListener('click', () => run(() => fixture.inspectHostedRow()));
+    status.textContent = 'Hosted fixture module ready.';
+  </script>
+</body>
+</html>

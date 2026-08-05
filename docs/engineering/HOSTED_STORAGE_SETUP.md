@@ -29,13 +29,24 @@ terms. Follow the steps in order; later steps depend on values produced earlier.
 
 ## 2. Apply the schema
 
-Run `supabase/migrations/0001_hosted_vault.sql` against the project — either paste
-it into the Supabase dashboard's SQL editor and run it once, or, if you have the
-Supabase CLI linked to this project, `supabase db push`. It creates the `vaults`
-table (one row per user, RLS-restricted to `auth.uid() = user_id`) and an empty,
-RLS-locked `plaid_secrets` placeholder for a later phase. Confirm in the dashboard's
-**Table Editor** that Row-Level Security shows as **enabled** on both tables — the
-migration turns it on, but it's worth eyeballing before relying on it.
+Apply both migrations in order: `supabase/migrations/0001_hosted_vault.sql`, then
+`supabase/migrations/0002_hosted_vault_integrity.sql`. Use the Supabase SQL editor
+or a CLI migration workflow linked to this *isolated test project*.
+
+The first migration creates `vaults` (one row per user, RLS-restricted to
+`auth.uid() = user_id`) and an empty, RLS-locked `plaid_secrets` placeholder. The
+second migration binds the row generation to the encrypted envelope, requires a
+monotonic hosted sequence on new writes, explicitly denies `anon` access, and
+removes browser-role privileges from `plaid_secrets`.
+
+Before relying on the project, confirm in the dashboard or SQL editor that:
+
+- RLS is enabled on both tables.
+- `vaults` has select/insert/update policies only for `auth.uid() = user_id`.
+- `vaults_enforce_envelope_integrity` exists as a `BEFORE INSERT OR UPDATE` trigger.
+- `authenticated` has select/insert/update privileges on `vaults`, but no delete
+  privilege; `anon` has no vault privileges.
+- `plaid_secrets` has no browser policy and no `anon` or `authenticated` privilege.
 
 ## 3. Set up Google sign-in
 
@@ -75,17 +86,21 @@ app ships, not before — there is no deadline for this while the app is web-onl
 
 ## 4. Deploy to Vercel
 
-This phase does not add any custom server code — the atomic conditional write is a
-direct, RLS-enforced call from the browser to Supabase's own REST API (see the
-implementation report for why). Vercel's role is exactly what `start.py` does today:
-serve the static files. Point a Vercel project at this repository with no build
-command and the repository root as the output directory, and set the two values
-from step 1 as the deployed `js/config.js` (Vercel doesn't run a build step here, so
-there's nothing to inject at build time — commit a deploy-specific `js/config.js`
-outside version control via Vercel's file-based deploy, or serve it from an
-endpoint you control; either way, keep the anon key out of git history even though
-it isn't a high-sensitivity secret, simply because a project's public URL and key
-together are a convenient, unnecessary thing to leave in a public repository).
+This phase does not add custom server code — the atomic conditional write is a
+direct, RLS-enforced call from the browser to Supabase's REST API. Vercel's role is
+to serve static files. Point a Vercel project at this repository with no build
+command and the repository root as the output directory. Supply a deployment-
+specific, untracked `js/config.js` with the HTTPS **project base URL** (not
+`/rest/v1`) and the public anon/publishable key.
+
+Never place a service-role key in that file, in a browser-exposed Vercel
+environment variable, or in Git history. The runtime rejects a non-base URL,
+insecure production URL, or obvious service-role key shape.
+
+For the integrity migration, apply the Supabase migration first and deploy the
+hardened static application immediately after. Older open clients that do not send
+the authenticated sequence will fail safely until reloaded; do not leave a mixed
+version fleet in place.
 
 ## 5. Verify
 
@@ -95,5 +110,10 @@ together are a convenient, unnecessary thing to leave in a public repository).
 3. Create a vault, add data, reload the page — you should land on the passphrase
    unlock screen, still signed in.
 4. In the Supabase dashboard's Table Editor, open `vaults` — there should be exactly
-   one row, and its `blob` column should be unreadable ciphertext, not JSON you can
-   make sense of.
+   one row, and its `blob.cipher.ciphertext` value should be opaque. Envelope
+   metadata such as timestamps, KDF settings, generation, and sequence is expected;
+   transaction/account/bucket/reimbursement plaintext is not.
+5. Use two synthetic Google/Supabase users—not production financial data—to perform
+   the cross-user RLS, forged-owner, stale-write, backup/restore, and session tests
+   listed in `V2A_HOSTED_STORAGE_ACCEPTANCE.md` before treating hosted storage as
+   accepted.

@@ -14,6 +14,9 @@ export function createVaultRepository(vaultApi = vault) {
     async readVaultGeneration() {
       return vaultApi.readVaultGeneration();
     },
+    async readVaultMetadata() {
+      return vaultApi.readVaultMetadata();
+    },
     // Same-device early warning only, replacing the native `storage` event that
     // never fires once the vault leaves localStorage. Not authoritative.
     subscribeToVaultChangedElsewhere(callback) {

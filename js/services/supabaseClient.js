@@ -15,7 +15,27 @@ export function readSupabaseConfig() {
   if (!config || typeof config.url !== 'string' || !config.url || typeof config.anonKey !== 'string' || !config.anonKey) {
     return null;
   }
-  return {url: config.url, anonKey: config.anonKey};
+  try {
+    const url = new URL(config.url);
+    const isLocalDevelopment = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+    if ((!isLocalDevelopment && url.protocol !== 'https:') || (isLocalDevelopment && !['http:', 'https:'].includes(url.protocol))) return null;
+    if (url.pathname !== '/' || url.search || url.hash) return null;
+    if (config.anonKey.startsWith('sb_secret_') || isLegacyServiceRoleKey(config.anonKey)) return null;
+    return {url:url.origin, anonKey: config.anonKey};
+  } catch {
+    return null;
+  }
+}
+
+function isLegacyServiceRoleKey(key) {
+  const parts = key.split('.');
+  if (parts.length !== 3) return false;
+  try {
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return payload?.role === 'service_role';
+  } catch {
+    return false;
+  }
 }
 
 export function isHostedStorageConfigured() {

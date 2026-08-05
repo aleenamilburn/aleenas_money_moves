@@ -18,6 +18,7 @@ import {
 } from './state.js';
 import {isHostedStorageConfigured} from './services/supabaseClient.js';
 import {AuthServiceError, getCurrentSession, onAuthStateChange, signInWithProvider, signOut as authSignOut} from './services/authService.js';
+import {mustClearUnlockedVault} from './services/sessionSafety.js';
 
 const seed = window.MONEY_MOVES_SEED;
 const $ = id => document.getElementById(id);
@@ -48,6 +49,7 @@ let allocationDraft = null;
 let allocationDraftDirty = false;
 let allocationEditorSource = null;
 let externalVaultChangeObserved = false;
+let localRecoveryStatus = {encryptedVault:false, encryptedVaultCorrupt:false, legacyState:false};
 
 const clone = value => JSON.parse(JSON.stringify(value));
 
@@ -71,6 +73,38 @@ function showPanel(name) {
   $('lockLayer').classList.add('show');
   $('appShell').setAttribute('aria-hidden','true');
   setMessage('lockMessage','');
+}
+
+function updateLocalRecoveryDisclosure(status) {
+  localRecoveryStatus = status || {encryptedVault:false, encryptedVaultCorrupt:false, legacyState:false};
+  const disclosure = $('localRecoveryDisclosure');
+  const adoptionPanel = $('localAdoptionPanel');
+  const unlockNotice = $('localRecoveryNotice');
+  const hasEncryptedRecovery = localRecoveryStatus.encryptedVault;
+  const hasCorruptEncryptedRecovery = localRecoveryStatus.encryptedVaultCorrupt;
+  const hasLegacyRecovery = localRecoveryStatus.legacyState;
+  disclosure.classList.toggle('hidden', !hasEncryptedRecovery && !hasCorruptEncryptedRecovery && !hasLegacyRecovery);
+  adoptionPanel.classList.toggle('hidden', !hasEncryptedRecovery);
+  unlockNotice.classList.toggle('hidden', !hasEncryptedRecovery && !hasCorruptEncryptedRecovery && !hasLegacyRecovery);
+  if (hasEncryptedRecovery) {
+    disclosure.textContent = 'An older encrypted local vault is still present in this browser. Creating a new vault starts empty and leaves that copy unchanged. You may instead adopt it explicitly below.';
+    unlockNotice.textContent = 'An older local recovery vault is also present in this browser. It has not been uploaded, merged, or deleted.';
+  } else if (hasLegacyRecovery) {
+    disclosure.textContent = 'Older local recovery data is present in this browser. It will not be uploaded, merged, or deleted automatically.';
+    unlockNotice.textContent = 'Older local recovery data remains in this browser and has not been changed automatically.';
+  } else if (hasCorruptEncryptedRecovery) {
+    disclosure.textContent = 'An older local encrypted recovery record is present but could not be read. It has not been deleted or changed.';
+    unlockNotice.textContent = 'An older local encrypted recovery record could not be read. It has not been deleted or changed.';
+  }
+}
+
+function downloadEncryptedRecovery(raw, filename) {
+  const blob = new Blob([raw], {type:'application/json'});
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(link.href);
 }
 
 function enterApp() {
@@ -123,7 +157,6 @@ async function persist() {
   try { await saveChain; }
   catch(error) {
     if (error?.code === 'VAULT_CONFLICT') showVaultConflict();
-    else console.error('Save failed',error);
     throw error;
   }
 }
@@ -628,6 +661,7 @@ function bindEvents() {
     const pass=$('newPass').value, confirm=$('confirmPass').value;
     if (pass.length<12) return setMessage('lockMessage','Use at least 12 characters.',true);
     if (pass!==confirm) return setMessage('lockMessage','Passphrases do not match.',true);
+    if (localRecoveryStatus.encryptedVault && !confirm('Create a new empty hosted vault? Your older local encrypted vault will remain unchanged in this browser.')) return;
     try {
       const created=await stateService.create(pass,seed);
       state=created.state;
@@ -638,6 +672,34 @@ function bindEvents() {
     } catch(error) {
       if (error?.code==='VAULT_AUTH_REQUIRED') { showPanel('signin'); return; }
       setMessage('lockMessage',error.message||'Could not create the vault.',true);
+    }
+  });
+  $('adoptLocalVault').addEventListener('click',async()=>{
+    const passphrase = $('localAdoptionPass').value;
+    if (!passphrase) return setMessage('lockMessage','Enter the passphrase for the older local vault.',true);
+    try {
+      const adopted = await stateService.adoptLocalVault(passphrase);
+      state=adopted.state;activeKey=adopted.key;keyMeta=adopted.meta;vaultGeneration=adopted.vaultGeneration;
+      $('localAdoptionPass').value='';
+      hideVaultConflict();
+      enterApp();
+    } catch(error) {
+      if (error?.code === 'LOCAL_VAULT_ADOPTION_CONFLICT' || error?.code === 'VAULT_CONFLICT') {
+        setMessage('lockMessage','A hosted vault already exists for this account. Money Moves did not overwrite either vault.',true);
+      } else if (error?.code === 'VAULT_AUTH_REQUIRED') {
+        showPanel('signin');
+      } else if (error?.code === 'VAULT_PERSISTENCE_FAILED') {
+        setMessage('lockMessage','Could not reach your encrypted vault. No local recovery data was changed.',true);
+      } else {
+        setMessage('lockMessage','The local vault or passphrase could not be verified. No hosted vault was created.',true);
+      }
+    }
+  });
+  $('downloadLocalRecovery').addEventListener('click',()=>{
+    try {
+      downloadEncryptedRecovery(stateService.exportLocalEncryptedRecovery(), `money-moves-local-recovery-${new Date().toISOString().slice(0,10)}.json`);
+    } catch {
+      setMessage('lockMessage','The local encrypted recovery copy could not be read.',true);
     }
   });
   $('unlockVault').addEventListener('click',async()=>{
@@ -716,7 +778,8 @@ function bindEvents() {
       alert('Passphrase changed.');
     } catch(error) {
       if (error?.code === 'VAULT_CONFLICT') { showVaultConflict();alert(error.message); }
-      else alert('The current passphrase was incorrect.');
+      else if (error?.code === 'VAULT_PERSISTENCE_FAILED') alert('Could not reach the encrypted vault. The passphrase was not changed.');
+      else alert('The current passphrase was incorrect or the vault could not be verified.');
     }
   });
   $('exportBackup').addEventListener('click',async()=>{
@@ -781,6 +844,13 @@ function bindEvents() {
 // vault is already unlocked in this tab so a routine token refresh doesn't reset the
 // screen out from under an active session.
 async function routeAfterAuthChange(session) {
+  if (state && mustClearUnlockedVault(currentSession, session)) {
+    if (allocationDraft) closeAllocationEditor();
+    activeKey=null; keyMeta=null; vaultGeneration=null; state=null;
+    externalVaultChangeObserved=false;
+    clearTimeout(inactivityTimer);
+    hideVaultConflict();
+  }
   currentSession = session;
   if (!session) {
     if (state) { activeKey=null; keyMeta=null; vaultGeneration=null; state=null; clearTimeout(inactivityTimer); }
@@ -790,9 +860,12 @@ async function routeAfterAuthChange(session) {
   if (state) return;
   try {
     const has = await stateService.hasVault();
+    updateLocalRecoveryDisclosure(stateService.localRecoveryStatus());
     showPanel(has ? 'unlock' : 'setup');
-  } catch {
-    setMessage('lockMessage','Could not reach your encrypted vault. Check your connection and try again.',true);
+  } catch(error) {
+    setMessage('lockMessage',error?.code === 'VAULT_INTEGRITY_FAILED'
+      ? 'The encrypted vault metadata could not be verified. Use a saved encrypted backup or contact support before creating a new vault.'
+      : 'Could not reach your encrypted vault. Check your connection and try again.',true);
     showPanel('signin');
   }
 }

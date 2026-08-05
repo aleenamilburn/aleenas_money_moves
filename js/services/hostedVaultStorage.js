@@ -73,7 +73,7 @@ async function readRowForUser(userId) {
     throw new HostedVaultNetworkError('read');
   }
   if (response.error) throw new HostedVaultNetworkError('read');
-  return response.data ? {generation: response.data.generation, blob: response.data.blob} : null;
+  return response.data ? {userId, generation: response.data.generation, blob: response.data.blob} : null;
 }
 
 export async function readHostedRow() {
@@ -101,11 +101,17 @@ async function performWrite(userId, {attemptedGeneration, expectedGeneration, ru
     return reconcile(userId, attemptedGeneration, expectedGeneration);
   }
   if (response.error) return reconcile(userId, attemptedGeneration, expectedGeneration);
-  if (!Array.isArray(response.data) || response.data.length === 0) {
+  if (Array.isArray(response.data) && response.data.length === 0) {
     throw new HostedVaultConflictError();
   }
+  // A response is authoritative only when PostgREST returns the exact generation
+  // this operation attempted. Treat malformed or mismatched acknowledgements like
+  // an interrupted response and reconcile with a fresh RLS-scoped read.
+  if (!Array.isArray(response.data) || response.data.length !== 1 || response.data[0]?.generation !== attemptedGeneration) {
+    return reconcile(userId, attemptedGeneration, expectedGeneration);
+  }
   announceRemoteWrite();
-  return {generation: attemptedGeneration};
+  return {userId, generation: attemptedGeneration};
 }
 
 async function reconcile(userId, attemptedGeneration, expectedGeneration) {
@@ -117,7 +123,7 @@ async function reconcile(userId, attemptedGeneration, expectedGeneration) {
   }
   if (current && current.generation === attemptedGeneration) {
     announceRemoteWrite();
-    return {generation: attemptedGeneration};
+    return {userId, generation: attemptedGeneration};
   }
   const writeNeverLanded = (current === null && expectedGeneration === null)
     || (current && current.generation === expectedGeneration);
