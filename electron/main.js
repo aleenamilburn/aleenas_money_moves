@@ -135,7 +135,10 @@ function createWindow() {
     show:false,
     title:'Money Moves',
     webPreferences:{
-      preload:path.join(path.dirname(fileURLToPath(import.meta.url)), 'preload.js'),
+      // Electron loads sandboxed preloads through CommonJS even when the app's
+      // package is ESM. Keep this bridge explicitly `.cjs` so the packaged
+      // renderer always receives the constrained desktop API.
+      preload:path.join(path.dirname(fileURLToPath(import.meta.url)), 'preload.cjs'),
       nodeIntegration:false,
       contextIsolation:true,
       sandbox:true,

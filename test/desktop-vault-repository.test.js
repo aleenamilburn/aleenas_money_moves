@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import {LocalVaultRepository, NO_VAULT_GENERATION} from '../electron/localVaultRepository.js';
+import {DESKTOP_VAULT_MAX_BYTES, LocalVaultRepository, NO_VAULT_GENERATION} from '../electron/localVaultRepository.js';
 import {createLegacyV1Envelope} from './helpers.js';
 import {deriveDesktopVaultKey} from '../js/services/desktopVaultRepository.js';
 
@@ -28,6 +28,10 @@ function envelope(number, sequence = number) {
 async function temporaryRepository(options = {}) {
   const baseDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'money-moves-desktop-vault-'));
   return {baseDirectory, repository:new LocalVaultRepository({baseDirectory, ...options})};
+}
+
+function injected(code = 'EIO') {
+  return () => { throw Object.assign(new Error('injected filesystem failure'), {code}); };
 }
 
 test('local vault repository creates, verifies, promotes, rotates, and advances generations', async t => {
@@ -97,4 +101,140 @@ test('backup import rejects an unsafe path and accepts only an encrypted .mmvaul
   await fs.writeFile(legacy, await createLegacyV1Envelope({schemaVersion:1}, 'legacy desktop import passphrase', deriveDesktopVaultKey), {mode:0o600});
   assert.equal((await repository.importFrom(legacy)).version, 1);
   await assert.rejects(repository.importFrom(path.join(baseDirectory, 'synthetic.json')), error => error.code === 'INVALID_BACKUP');
+});
+
+test('overlapping saves serialize locally and an external active replacement is not overwritten', async t => {
+  const {baseDirectory, repository} = await temporaryRepository();
+  t.after(() => fs.rm(baseDirectory, {recursive:true, force:true}));
+  const first = envelope(1);
+  await repository.create(first);
+  const [left, right] = await Promise.allSettled([
+    repository.save(envelope(2), {expectedVaultGeneration:first.vaultGeneration}),
+    repository.save(envelope(3), {expectedVaultGeneration:first.vaultGeneration})
+  ]);
+  assert.equal([left, right].filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal([left, right].filter(result => result.status === 'rejected' && result.reason.code === 'VAULT_CONFLICT').length, 1);
+
+  const active = (await repository.load()).encryptedEnvelope;
+  const external = envelope(4);
+  const guarded = new LocalVaultRepository({
+    baseDirectory,
+    hooks:{beforePromotion:async () => fs.writeFile(repository.layout.active, JSON.stringify(external), {mode:0o600})}
+  });
+  await assert.rejects(
+    guarded.save(envelope(5), {expectedVaultGeneration:active.vaultGeneration}),
+    error => error.code === 'VAULT_CONFLICT'
+  );
+  assert.deepEqual((await guarded.load()).encryptedEnvelope, external);
+});
+
+test('deterministic pending-write, flush, verification, rotation, rename, and permission failures preserve active data', async t => {
+  const cases = [
+    ['write', {beforeWrite:stage => stage === 'pending' ? injected()() : undefined}, 'FILE_WRITE_FAILED'],
+    ['flush', {beforeFlush:stage => stage === 'pending' ? injected()() : undefined}, 'FILE_WRITE_FAILED'],
+    ['verification', {beforeVerification:stage => stage === 'pending' ? injected()() : undefined}, 'FILE_WRITE_FAILED'],
+    ['rotation', {beforeRotation:injected()}, 'FILE_WRITE_FAILED'],
+    ['rename', {beforeRename:injected()}, 'FILE_WRITE_FAILED'],
+    ['permission', {beforeWrite:stage => stage === 'pending' ? injected('EACCES')() : undefined}, 'FILE_PERMISSION_DENIED'],
+    ['disk-full', {beforeWrite:stage => stage === 'pending' ? injected('ENOSPC')() : undefined}, 'FILE_WRITE_FAILED'],
+    ['pending-directory-sync', {beforeDirectorySync:stage => stage === 'pending' ? injected()() : undefined}, 'FILE_WRITE_FAILED']
+  ];
+  for (const [label, hooks, expectedCode] of cases) {
+    await t.test(label, async t => {
+      const {baseDirectory, repository:seeded} = await temporaryRepository();
+      t.after(() => fs.rm(baseDirectory, {recursive:true, force:true}));
+      const stable = envelope(1);
+      await seeded.create(stable);
+      const repository = new LocalVaultRepository({baseDirectory, hooks});
+      await assert.rejects(repository.save(envelope(2), {expectedVaultGeneration:stable.vaultGeneration}), error => error.code === expectedCode);
+      assert.deepEqual((await repository.load()).encryptedEnvelope, stable);
+    });
+  }
+});
+
+test('a durability failure after rename reports failure without rolling active data back', async t => {
+  const {baseDirectory, repository:seeded} = await temporaryRepository();
+  t.after(() => fs.rm(baseDirectory, {recursive:true, force:true}));
+  const stable = envelope(1);
+  const promoted = envelope(2);
+  await seeded.create(stable);
+  const repository = new LocalVaultRepository({baseDirectory, hooks:{beforeDirectorySync:stage => stage === 'active' ? injected()() : undefined}});
+  await assert.rejects(repository.save(promoted, {expectedVaultGeneration:stable.vaultGeneration}), error => error.code === 'FILE_WRITE_FAILED');
+  assert.deepEqual((await repository.load()).encryptedEnvelope, promoted);
+  assert.deepEqual(JSON.parse(await fs.readFile(repository.layout.previous, 'utf8')), stable);
+});
+
+test('symlink substitution cannot be followed for vault files, import, or export', async t => {
+  const {baseDirectory, repository:seeded} = await temporaryRepository();
+  t.after(() => fs.rm(baseDirectory, {recursive:true, force:true}));
+  const stable = envelope(1);
+  await seeded.create(stable);
+  const outside = path.join(baseDirectory, 'outside.mmvault');
+  const outsideRaw = JSON.stringify(envelope(9));
+  await fs.writeFile(outside, outsideRaw, {mode:0o600});
+  const repository = new LocalVaultRepository({
+    baseDirectory,
+    hooks:{beforeWrite:async stage => {
+      if (stage === 'pending') await fs.symlink(outside, seeded.layout.pending);
+    }}
+  });
+  await assert.rejects(repository.save(envelope(2), {expectedVaultGeneration:stable.vaultGeneration}), error => error.code === 'FILE_WRITE_FAILED');
+  assert.equal(await fs.readFile(outside, 'utf8'), outsideRaw);
+  assert.deepEqual((await repository.load()).encryptedEnvelope, stable);
+
+  const importedLink = path.join(baseDirectory, 'linked.mmvault');
+  await fs.symlink(outside, importedLink);
+  await assert.rejects(repository.importFrom(importedLink), error => error.code === 'INVALID_BACKUP');
+
+  await fs.rm(seeded.layout.active);
+  await fs.symlink(outside, seeded.layout.active);
+  await assert.rejects(repository.load(), error => error.code === 'VAULT_CORRUPT');
+});
+
+test('malformed, oversized, and recovery-evidence files never become automatic authority', async t => {
+  const {baseDirectory, repository} = await temporaryRepository();
+  t.after(() => fs.rm(baseDirectory, {recursive:true, force:true}));
+  await fs.mkdir(repository.layout.directory, {recursive:true, mode:0o700});
+  await fs.writeFile(repository.layout.previous, JSON.stringify(envelope(1)), {mode:0o600});
+  await fs.writeFile(repository.layout.pending, '{interrupted', {mode:0o600});
+  assert.deepEqual(await repository.load(), {encryptedEnvelope:null, vaultGeneration:NO_VAULT_GENERATION, recovery:'RECOVERY_REQUIRED'});
+  assert.equal((await repository.inspect()).recoveryRequired, true);
+
+  await fs.writeFile(repository.layout.active, '{corrupt active', {mode:0o600});
+  await assert.rejects(repository.inspect(), error => error.code === 'VAULT_CORRUPT');
+  await assert.rejects(repository.load(), error => error.code === 'VAULT_CORRUPT');
+
+  await fs.writeFile(repository.layout.active, 'x'.repeat(DESKTOP_VAULT_MAX_BYTES + 1), {mode:0o600});
+  await assert.rejects(repository.load(), error => error.code === 'FILE_TOO_LARGE');
+  await assert.rejects(repository.create({...envelope(2), unexpected:true}), error => error.code === 'INVALID_VAULT_ENVELOPE');
+});
+
+test('interrupted recovery can be repeated and successful restore keeps exact backup bytes separate from the new authority', async t => {
+  const {baseDirectory, repository:seeded} = await temporaryRepository();
+  t.after(() => fs.rm(baseDirectory, {recursive:true, force:true}));
+  await fs.mkdir(seeded.layout.directory, {recursive:true, mode:0o700});
+  const prior = envelope(1);
+  await fs.writeFile(seeded.layout.previous, JSON.stringify(prior), {mode:0o600});
+  const replacement = envelope(2);
+  const interrupted = new LocalVaultRepository({baseDirectory, hooks:{beforePromotion:injected()}});
+  await assert.rejects(interrupted.restore(replacement, {expectedVaultGeneration:NO_VAULT_GENERATION}), error => error.code === 'FILE_WRITE_FAILED');
+  assert.deepEqual(await interrupted.load(), {encryptedEnvelope:null, vaultGeneration:NO_VAULT_GENERATION, recovery:'RECOVERY_REQUIRED'});
+
+  const recovered = new LocalVaultRepository({baseDirectory});
+  assert.equal((await recovered.restore(replacement, {expectedVaultGeneration:NO_VAULT_GENERATION})).vaultGeneration, replacement.vaultGeneration);
+  assert.deepEqual((await recovered.load()).encryptedEnvelope, replacement);
+  assert.deepEqual(JSON.parse(await fs.readFile(recovered.layout.previous, 'utf8')), prior);
+});
+
+test('encrypted backup export is exact, ciphertext-only at the boundary, and does not mutate the vault', async t => {
+  const {baseDirectory, repository} = await temporaryRepository();
+  t.after(() => fs.rm(baseDirectory, {recursive:true, force:true}));
+  const active = envelope(1);
+  await repository.create(active);
+  const raw = await fs.readFile(repository.layout.active, 'utf8');
+  const target = path.join(baseDirectory, 'synthetic-export.mmvault');
+  await repository.exportTo(target);
+  assert.equal(await fs.readFile(target, 'utf8'), raw);
+  assert.equal((await repository.load()).vaultGeneration, active.vaultGeneration);
+  assert.equal((await fs.stat(target)).mode & 0o777, 0o600);
 });

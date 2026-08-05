@@ -5,7 +5,7 @@ Last updated: 2026-08-05
 | Area | Status | Evidence |
 |---|---|---|
 | V1 user-facing workflows | IMPLEMENTED / PRESERVED | Existing navigation, weekly review, CSV, travel, debt/goals, settings, migrations, IDs, allocations, and reimbursement services are preserved in the desktop renderer. |
-| Desktop Application Foundation | IMPLEMENTED / AWAITING ACCEPTANCE | `DESKTOP_FIRST_ARCHITECTURE_DECISION.md`; `V2_DESKTOP_FOUNDATION_IMPLEMENTATION.md`; Electron shell, custom local protocol, narrow IPC, authoritative encrypted local vault, atomic replacement, manual encrypted backup/restore, single instance, package scan, unsigned ARM64 DMG, and focused tests. |
+| Desktop Application Foundation | ACCEPTED | `DESKTOP_FIRST_ARCHITECTURE_DECISION.md`; `V2_DESKTOP_FOUNDATION_ACCEPTANCE.md`; Electron shell, custom local protocol, narrow IPC, authoritative encrypted local vault, atomic replacement, manual encrypted backup/restore, single instance, package scan, and unsigned ARM64 DMG. One manual native-dialog beta checklist item remains. |
 | V2 Foundation | IMPLEMENTED AND REVIEWED | `V2_FOUNDATION_REVIEW.md`; schema, migration, models, repository/service boundary, and vault compatibility. |
 | Bucket Explorer | IMPLEMENTED AND ACCEPTED | `V2A_BUCKET_EXPLORER_ACCEPTANCE.md`; parent management, detail ledger, filters, archive safety, automated and browser acceptance passed. |
 | Two-Level Sub-Buckets | IMPLEMENTED AND ACCEPTED | Exactly two levels; create, rename, reorder, move, archive/restore, rolled-up totals, validation, persistence, and browser acceptance passed. |

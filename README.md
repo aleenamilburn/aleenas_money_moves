@@ -29,7 +29,7 @@ This release preserves the current user workflows, schema-7 migrations, IDs, buc
 
 ## Desktop foundation status
 
-The Electron shell, encrypted local-file repository, atomic replacement, generation conflict checks, manual encrypted backup/restore, single-instance behavior, package inspection, and unsigned macOS DMG are implemented and awaiting independent acceptance. Hosted live vault synchronization is deferred and not accepted.
+The Electron shell, encrypted local-file repository, atomic replacement, generation conflict checks, manual encrypted backup/restore, single-instance behavior, package inspection, and unsigned macOS DMG are accepted with low-risk follow-ups. Complete one manual native-dialog export/import/restore check on a beta Mac before broad distribution. Hosted live vault synchronization is deferred and not accepted.
 
 ## Monthly rollover
 

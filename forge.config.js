@@ -10,6 +10,8 @@ export default {
     ignore:[
       /^\/test($|\/)/,
       /^\/docs($|\/)/,
+      /^\/node_modules($|\/)/,
+      /^\/scripts($|\/)/,
       /^\/supabase($|\/)/,
       /^\/\.git($|\/)/,
       /^\/\.agents($|\/)/,
@@ -22,7 +24,13 @@ export default {
       /^\/node_modules\/\.cache($|\/)/,
       /^\/sample-transactions\.csv$/,
       /^\/start\.(py|sh|command|bat)$/,
+      /^\/forge\.config\.js$/,
+      /^\/(AGENTS|CHANGELOG|README|SECURITY)\.md$/,
+      /^\/VERSION$/,
+      /^\/pnpm-(lock|workspace)\.yaml$/,
       /^\/js\/config(\.example)?\.js$/,
+      /^\/js\/vault\.js$/,
+      /^\/js\/services\/(authService|hostedVaultStorage|sessionSafety|supabaseClient|vaultRepository)\.js$/,
       /^\/js\/vendor\/supabase-js($|\/)/,
       /\.map$/
     ]

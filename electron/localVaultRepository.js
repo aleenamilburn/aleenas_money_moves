@@ -6,7 +6,12 @@ export const DESKTOP_VAULT_MAX_BYTES = 16 * 1024 * 1024;
 export const NO_VAULT_GENERATION = 'mmvg:none';
 
 const GENERATION_PATTERN = /^mmvg:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const FILES = Object.freeze({active:'active.mmvault', previous:'previous.mmvault', pending:'pending.mmvault'});
+const FILES = Object.freeze({
+  active:'active.mmvault',
+  previous:'previous.mmvault',
+  previousStaging:'previous.staging.mmvault',
+  pending:'pending.mmvault'
+});
 
 export class DesktopVaultError extends Error {
   constructor(code, message) {
@@ -124,13 +129,13 @@ export class LocalVaultRepository {
   }
 
   async exportTo(destination) {
-    const source = this.layout.active;
     await this.#assertDialogDestination(destination);
     const active = await this.#readNamed(FILES.active, {missing:null, malformed:'VAULT_CORRUPT'});
     if (!active) throw error('VAULT_NOT_FOUND', 'The encrypted vault was not found.');
     try {
-      await fs.copyFile(source, destination, fsConstants.COPYFILE_EXCL);
-      await fs.chmod(destination, 0o600);
+      // Preserve the exact encrypted bytes that were just validated, and create
+      // the destination exclusively so a raced symlink can never be followed.
+      await this.#writeFreshAndVerify(destination, active.raw, {stage:'export'});
     } catch (cause) {
       if (cause?.code === 'EEXIST') throw error('FILE_WRITE_FAILED', 'A backup file already exists at that location.');
       throw mapFileError(cause, 'write');
@@ -141,10 +146,10 @@ export class LocalVaultRepository {
   async importFrom(source) {
     if (typeof source !== 'string' || path.extname(source).toLowerCase() !== '.mmvault') throw error('INVALID_BACKUP', 'Choose a Money Moves encrypted backup.');
     try {
-      const stat = await fs.lstat(source);
-      if (!stat.isFile() || stat.isSymbolicLink()) throw error('INVALID_BACKUP', 'Choose a Money Moves encrypted backup.');
-      if (stat.size > DESKTOP_VAULT_MAX_BYTES) throw error('FILE_TOO_LARGE', 'The encrypted vault file is too large.');
-      const raw = await fs.readFile(source, 'utf8');
+      const raw = await this.#readRegularFile(source, {
+        invalidCode:'INVALID_BACKUP',
+        invalidMessage:'Choose a Money Moves encrypted backup.'
+      });
       const envelope = JSON.parse(raw);
       validateEncryptedEnvelope(envelope, {allowLegacy:true});
       return envelope;
@@ -170,11 +175,25 @@ export class LocalVaultRepository {
       // A pending file with a valid active file is recovery evidence only, never
       // authority. It is safe to clear before starting a new replacement.
       await fs.rm(pendingPath, {force:true});
-      await this.#writeAndVerify(pendingPath, serialized);
+      await this.#writeFreshAndVerify(pendingPath, serialized, {stage:'pending'});
+      await this.#syncDirectory('pending');
+
+      // An external replacement can occur while the new envelope is being
+      // written. Compare both the opaque generation and exact active bytes
+      // before rotating or promoting; never overwrite that replacement.
+      const beforeRotation = await this.#readNamed(FILES.active, {missing:null, malformed:'VAULT_CORRUPT'});
+      this.#assertActiveUnchanged(beforeRotation, active, expectedVaultGeneration);
+      if (beforeRotation) await this.#preservePrevious(beforeRotation.raw);
       await this.#hooks.beforePromotion?.();
-      if (active) await this.#preservePrevious(active.raw);
+
+      // Repeat the check after prior-vault rotation. This closes the normal
+      // check-then-promote window for competing repository instances and
+      // external file replacement while retaining the single-instance lock.
+      const beforePromotion = await this.#readNamed(FILES.active, {missing:null, malformed:'VAULT_CORRUPT'});
+      this.#assertActiveUnchanged(beforePromotion, active, expectedVaultGeneration);
+      await this.#hooks.beforeRename?.();
       await fs.rename(pendingPath, this.layout.active);
-      await this.#syncDirectory();
+      await this.#syncDirectory('active');
       await this.#hooks.afterPromotion?.();
       return {vaultGeneration:envelope.vaultGeneration};
     } catch (cause) {
@@ -182,32 +201,57 @@ export class LocalVaultRepository {
     }
   }
 
-  async #preservePrevious(raw) {
-    const previousPath = this.layout.previous;
-    await this.#writeAndVerify(previousPath, raw);
+  #assertActiveUnchanged(current, original, expectedVaultGeneration) {
+    const generation = current?.envelope.vaultGeneration || NO_VAULT_GENERATION;
+    if (generation !== expectedVaultGeneration || Boolean(current) !== Boolean(original) || (current && current.raw !== original.raw)) {
+      throw error('VAULT_CONFLICT', 'The encrypted vault changed before it could be saved.');
+    }
   }
 
-  async #writeAndVerify(target, serialized) {
+  async #preservePrevious(raw) {
+    const stagingPath = path.join(this.#directory, FILES.previousStaging);
+    const previousPath = this.layout.previous;
+    try {
+      await fs.rm(stagingPath, {force:true});
+      await this.#hooks.beforeRotation?.();
+      await this.#writeFreshAndVerify(stagingPath, raw, {stage:'previous'});
+      await fs.rename(stagingPath, previousPath);
+      await this.#syncDirectory('previous');
+    } finally {
+      // A failed rotation must leave the active vault authoritative. Staging is
+      // ciphertext only, and is removed when possible so it cannot be mistaken
+      // for recovery evidence on a later launch.
+      await fs.rm(stagingPath, {force:true}).catch(() => {});
+    }
+  }
+
+  async #writeFreshAndVerify(target, serialized, {stage}) {
     let handle;
     try {
-      handle = await fs.open(target, 'w', 0o600);
+      await this.#hooks.beforeWrite?.(stage);
+      handle = await fs.open(target, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
       await handle.writeFile(serialized, 'utf8');
+      await this.#hooks.beforeFlush?.(stage);
       await handle.sync();
     } finally {
       await handle?.close();
     }
     await fs.chmod(target, 0o600);
-    const verified = await fs.readFile(target, 'utf8');
+    await this.#hooks.beforeVerification?.(stage);
+    const verified = await this.#readRegularFile(target, {
+      invalidCode:'FILE_WRITE_FAILED',
+      invalidMessage:'Money Moves could not verify the encrypted vault save.'
+    });
     if (verified !== serialized) throw error('FILE_WRITE_FAILED', 'Money Moves could not verify the encrypted vault save.');
   }
 
   async #readNamed(name, {missing, malformed}) {
     const target = path.join(this.#directory, name);
     try {
-      const stat = await fs.lstat(target);
-      if (!stat.isFile() || stat.isSymbolicLink()) throw error(malformed, 'The encrypted vault could not be verified.');
-      if (stat.size > DESKTOP_VAULT_MAX_BYTES) throw error('FILE_TOO_LARGE', 'The encrypted vault file is too large.');
-      const raw = await fs.readFile(target, 'utf8');
+      const raw = await this.#readRegularFile(target, {
+        invalidCode:malformed,
+        invalidMessage:'The encrypted vault could not be verified.'
+      });
       const envelope = JSON.parse(raw);
       validateEncryptedEnvelope(envelope);
       return {raw, envelope};
@@ -216,6 +260,22 @@ export class LocalVaultRepository {
       if (cause instanceof DesktopVaultError) throw cause;
       if (cause instanceof SyntaxError) throw error(malformed, 'The encrypted vault could not be verified.');
       throw mapFileError(cause, 'read');
+    }
+  }
+
+  async #readRegularFile(target, {invalidCode, invalidMessage}) {
+    let handle;
+    try {
+      handle = await fs.open(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      const stat = await handle.stat();
+      if (!stat.isFile()) throw error(invalidCode, invalidMessage);
+      if (stat.size > DESKTOP_VAULT_MAX_BYTES) throw error('FILE_TOO_LARGE', 'The encrypted vault file is too large.');
+      return await handle.readFile('utf8');
+    } catch (cause) {
+      if (cause?.code === 'ELOOP') throw error(invalidCode, invalidMessage);
+      throw cause;
+    } finally {
+      await handle?.close();
     }
   }
 
@@ -247,16 +307,21 @@ export class LocalVaultRepository {
   async #ensureDirectory() {
     try {
       await fs.mkdir(this.#directory, {recursive:true, mode:0o700});
+      const stat = await fs.lstat(this.#directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw error('FILE_WRITE_FAILED', 'Money Moves could not safely access the encrypted vault directory.');
       await fs.chmod(this.#directory, 0o700);
     } catch (cause) {
       throw mapFileError(cause, 'write');
     }
   }
 
-  async #syncDirectory() {
+  async #syncDirectory(stage) {
     let handle;
-    try { handle = await fs.open(this.#directory, 'r'); await handle.sync(); }
-    catch { /* Some file systems do not support directory fsync. */ }
+    try {
+      await this.#hooks.beforeDirectorySync?.(stage);
+      handle = await fs.open(this.#directory, 'r');
+      await handle.sync();
+    }
     finally { await handle?.close(); }
   }
 

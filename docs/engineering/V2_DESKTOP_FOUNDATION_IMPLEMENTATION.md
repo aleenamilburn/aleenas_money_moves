@@ -1,6 +1,6 @@
 # Money Moves — V2 Desktop Foundation Implementation
 
-**Status:** IMPLEMENTED / AWAITING ACCEPTANCE
+**Status:** IMPLEMENTED; independently accepted with low-risk follow-ups. See `V2_DESKTOP_FOUNDATION_ACCEPTANCE.md`.
 **Base revision:** `c591368` (`Harden hosted storage correction candidate`)
 **Implementation candidate:** `v2-desktop-foundation-candidate` (`Implement desktop-first Electron foundation`)
 **Domain schema:** 7
@@ -50,7 +50,7 @@ Future signing/notarization hooks are intentionally not configured with credenti
 
 ## 6. Files and tests
 
-Key implementation files: `electron/main.js`, `electron/preload.js`, `electron/localVaultRepository.js`, `js/services/desktopVaultRepository.js`, `forge.config.js`, package scripts/configuration, package inspector, renderer CSP/runtime selection, and focused desktop tests.
+Key implementation files: `electron/main.js`, `electron/preload.cjs`, `electron/localVaultRepository.js`, `js/services/desktopVaultRepository.js`, `forge.config.js`, package scripts/configuration, package inspector, renderer CSP/runtime selection, and focused desktop tests.
 
 Focused tests cover envelope validation, create/load/save, stale conflict, byte-verified promotion, prior-envelope preservation, failed promotion rollback, malformed pending evidence, non-automatic recovery, permissions, constrained import, renderer encryption/passphrase/generation behavior, V1 encrypted backup verification, IPC/preload shape, BrowserWindow security, CSP, protocol, fuse configuration, and asset exclusion. Existing browser/domain regression remains separately preserved.
 
@@ -58,15 +58,18 @@ Commands run during implementation:
 
 ```text
 CI=true pnpm run check                         passed
-CI=true pnpm run electron:test                 8 passed, 0 failed
-CI=true pnpm test                              148 passed, 0 failed
-PYTHONPYCACHEPREFIX=/private/tmp/money_moves_pycache python3 -m py_compile start.py  pending final rerun
+CI=true pnpm run electron:test                 23 passed, 0 failed
+CI=true pnpm test                              163 passed, 0 failed
+PYTHONPYCACHEPREFIX=/private/tmp/money_moves_pycache python3 -m py_compile start.py  passed
 CI=true pnpm run electron:package              passed (ARM64 macOS app)
 CI=true pnpm run electron:make                 passed (unsigned DMG and ZIP)
-CI=true pnpm run inspect:package               passed (286 files, 66 archive entries)
+CI=true pnpm run inspect:package               passed (286 files, 25 archive entries)
 ```
 
-The controlled Forge development launch and packaged launch smoke checks loaded the app with isolated temporary Chromium profiles and emitted no Electron console error after the custom-protocol fix. This is not independent acceptance and does not replace the full manual workflow matrix.
+The independent acceptance record regenerated the package/DMG, verified the fuse
+bytes and ASAR contents, and completed controlled synthetic packaged-app and
+mounted-DMG workflows. See `V2_DESKTOP_FOUNDATION_ACCEPTANCE.md` for the
+remaining low-risk native-dialog follow-up.
 
 ## 7. Known limitations and acceptance recommendation
 

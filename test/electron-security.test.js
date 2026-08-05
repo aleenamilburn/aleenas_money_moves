@@ -6,7 +6,7 @@ const read = file => fs.readFile(new URL(`../${file}`, import.meta.url), 'utf8')
 
 test('Electron main, preload, Forge, and packaged HTML enforce the desktop security baseline', async () => {
   const [main, preload, forge, html, adapter] = await Promise.all([
-    read('electron/main.js'), read('electron/preload.js'), read('forge.config.js'), read('index.html'), read('js/services/desktopVaultRepository.js')
+    read('electron/main.js'), read('electron/preload.cjs'), read('forge.config.js'), read('index.html'), read('js/services/desktopVaultRepository.js')
   ]);
   for (const setting of ['nodeIntegration:false', 'contextIsolation:true', 'sandbox:true', 'webSecurity:true', 'allowRunningInsecureContent:false', 'experimentalFeatures:false']) assert.match(main, new RegExp(setting));
   assert.match(main, /protocol\.handle\(APP_PROTOCOL/);

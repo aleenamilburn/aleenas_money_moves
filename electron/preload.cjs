@@ -1,4 +1,4 @@
-import {contextBridge, ipcRenderer} from 'electron';
+const {contextBridge, ipcRenderer} = require('electron');
 
 const MAX_ENVELOPE_BYTES = 16 * 1024 * 1024;
 

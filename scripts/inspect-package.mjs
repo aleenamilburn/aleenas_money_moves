@@ -3,8 +3,12 @@ import path from 'node:path';
 import {extractFile, listPackage} from '@electron/asar';
 
 const root = path.resolve(process.argv[2] || 'out');
-const forbiddenSegments = new Set(['test', 'docs', 'supabase', '.git', '.agents', '.codex', '.claude', '.pnpm-store', '__pycache__']);
-const forbiddenNames = new Set(['sample-transactions.csv', 'config.js', 'config.example.js']);
+const forbiddenSegments = new Set(['test', 'docs', 'node_modules', 'scripts', 'supabase', '.git', '.agents', '.codex', '.claude', '.pnpm-store', '__pycache__']);
+const forbiddenNames = new Set([
+  'AGENTS.md', 'CHANGELOG.md', 'README.md', 'SECURITY.md', 'VERSION', 'forge.config.js',
+  'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'sample-transactions.csv', 'config.js', 'config.example.js', 'vault.js',
+  'authService.js', 'hostedVaultStorage.js', 'sessionSafety.js', 'supabaseClient.js', 'vaultRepository.js'
+]);
 
 async function walk(directory, files = []) {
   const entries = await fs.readdir(directory, {withFileTypes:true});

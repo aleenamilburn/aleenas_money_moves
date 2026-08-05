@@ -614,10 +614,17 @@ function renderDebt() {
     <small>${item.utilization!==null?`${item.utilization.toFixed(1)}% utilization`: 'Credit limit unavailable'}${item.apr?` · ${item.apr.toFixed(2)}% purchase APR`:''}${item.dueDate?` · due ${item.dueDate}`:''}</small>
   </div>`).join('');
 
-  const goalIds=['travel','emergency','debt'];
+  const goalDefinitions=[
+    ['travel','Travel'],
+    ['emergency','Emergency savings'],
+    ['debt','Debt reduction']
+  ];
   const summary=monthSummary(state);
-  $('goalCards').innerHTML=goalIds.map(id=>{
+  $('goalCards').innerHTML=goalDefinitions.map(([id,label])=>{
     const bucket=bucketById(state,id);
+    if (!bucket) {
+      return `<div class="goal-item"><div class="row"><strong>${label}</strong><strong>${money(0)}</strong></div><small>Create a bucket to track this goal.</small></div>`;
+    }
     const actual=summary.actuals[id]||0;
     return `<div class="goal-item"><div class="row"><strong>${escapeHtml(bucket.name)}</strong><strong>${money(bucket.target)}</strong></div><small>${money(actual)} currently categorized this month · protected before safe-to-spend</small></div>`;
   }).join('');
