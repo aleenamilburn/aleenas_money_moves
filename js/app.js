@@ -11,23 +11,27 @@ import {
 } from './services/allocationService.js';
 import {
   upgradeStateWithMigration, money, monthLabel, availableMonths, availableWeeks, weekLabel,
-  weekStats, weekTransactions, reviewQueue, sortedBuckets, assignBucket, addTransactions,
+  weekStats, weekTransactions, reviewQueue, addTransactions,
   monthSummary, debtAccounts,
   rankedDestinations, addVisited, scriptureForMonth, bucketById
 } from './state.js';
-const isDesktop = Boolean(globalThis.moneyMovesDesktop?.vault);
-const {createVaultRepository} = isDesktop
+import {reviewAssignmentTarget, reviewParentBuckets, reviewSuggestedParentId} from './services/reviewAssignment.js';
+import {desktopStartupFailure, desktopVaultScreen, inspectDesktopVault} from './services/desktopStartup.js';
+const isDesktopProtocol = window.location.protocol === 'money-moves:';
+const isDesktop = isDesktopProtocol && Boolean(globalThis.moneyMovesDesktop?.vault);
+const startupFailure = desktopStartupFailure({isDesktopProtocol, hasDesktopBridge:isDesktop});
+const {createVaultRepository} = startupFailure ? {createVaultRepository:null} : isDesktop
   ? {createVaultRepository:(await import('./services/desktopVaultRepository.js')).createDesktopVaultRepository}
   : await import('./services/vaultRepository.js');
-const browserRuntime = isDesktop ? null : {
+const browserRuntime = (isDesktop || startupFailure) ? null : {
   ...(await import('./services/supabaseClient.js')),
   ...(await import('./services/authService.js')),
   ...(await import('./services/sessionSafety.js'))
 };
 const seed = window.MONEY_MOVES_SEED;
 const $ = id => document.getElementById(id);
-const vaultRepository = createVaultRepository();
-const stateService = createStateService({
+const vaultRepository = createVaultRepository?.();
+const stateService = vaultRepository && createStateService({
   repository:vaultRepository,
   seed,
   migrate:input=>upgradeStateWithMigration(input,seed)
@@ -52,6 +56,7 @@ let archivingBucketId = null;
 let allocationDraft = null;
 let allocationDraftDirty = false;
 let allocationEditorSource = null;
+let reviewChildChooser = null;
 let externalVaultChangeObserved = false;
 let localRecoveryStatus = {encryptedVault:false, encryptedVaultCorrupt:false, legacyState:false};
 
@@ -70,6 +75,8 @@ function setMessage(id,message,isError=false) {
 }
 
 function showPanel(name) {
+  $('startupPanel').classList.toggle('hidden', true);
+  $('startupFailurePanel').classList.toggle('hidden', true);
   $('notConfiguredPanel').classList.toggle('hidden',name!=='not-configured');
   $('signinPanel').classList.toggle('hidden',name!=='signin');
   $('setupPanel').classList.toggle('hidden',name!=='setup');
@@ -77,6 +84,7 @@ function showPanel(name) {
   $('lockLayer').classList.add('show');
   $('appShell').setAttribute('aria-hidden','true');
   setMessage('lockMessage','');
+  globalThis.moneyMovesStartup?.ready();
 }
 
 function updateLocalRecoveryDisclosure(status) {
@@ -125,6 +133,7 @@ function enterApp() {
 // re-entered.
 function lockApp() {
   if (allocationDraft) closeAllocationEditor();
+  if (reviewChildChooser) closeReviewChildChooser();
   activeKey=null; keyMeta=null; vaultGeneration=null; state=null;
   externalVaultChangeObserved=false;
   clearTimeout(inactivityTimer);
@@ -220,27 +229,29 @@ function renderOverview() {
   $('cashFlow').textContent=money(summary.cashFlow);
   $('cashFlow').classList.toggle('is-negative',summary.cashFlow<0);
   $('cashFlow').classList.toggle('is-positive',summary.cashFlow>=0);
-  $('cashFlowNote').textContent=`${money(summary.income)} posted income minus ${money(summary.spend)} spending`;
+  $('cashFlowNote').textContent=`${money(summary.income)} income minus ${money(summary.spend)} spending${summary.debtPayments ? ` and ${money(summary.debtPayments)} debt payments` : ''}`;
   $('netWorth').textContent=money(state.providerSnapshot.netWorth);
   $('netWorth').classList.toggle('is-negative',state.providerSnapshot.netWorth<0);
   $('netWorth').classList.toggle('is-positive',state.providerSnapshot.netWorth>=0);
-  $('snapshotAsOf').textContent=`Snapshot through ${state.providerSnapshot.asOf}`;
+  $('snapshotAsOf').textContent=/^\d{4}-\d{2}-\d{2}$/.test(state.providerSnapshot.asOf || '')
+    ? `Snapshot through ${state.providerSnapshot.asOf}`
+    : 'No account snapshot available.';
   const stats=weekStats(state);
   $('reviewPercent').textContent=`${stats.completion}%`;
   $('reviewMetricNote').textContent=`${stats.remaining} transaction${stats.remaining===1?'':'s'} left in ${weekLabel(state.review.selectedWeek)}`;
 
   const actuals=summary.actuals;
-  const buckets=sortedBuckets(state,false);
+  const buckets=listBuckets(state,{parentId:null}).filter(bucket=>bucket.semanticType==='spending');
   $('overviewBuckets').innerHTML=buckets.map(bucket=>{
     const actual=Number(actuals[bucket.id]||0);
-    const target=Number(bucket.target||0);
+    const target=bucket.targetCents/100;
     const pct=target>0?Math.min(actual/target*100,100):(actual>0?100:0);
     return `<div class="progress-row">
       <div class="name"><strong>${escapeHtml(bucket.name)}</strong><small>${escapeHtml(bucket.group)}${bucket.protected?' · protected':''}</small></div>
       <div class="bar"><progress class="${target>0&&actual>target?'over':''}" max="100" value="${pct}">${pct}%</progress></div>
       <div class="amount-pair"><strong>${money(actual)}</strong><small>of ${money(target)}</small></div>
     </div>`;
-  }).join('');
+  }).join('') || '<p class="empty-state">No ordinary spending buckets yet. Add one in Buckets & rules; system classifications do not appear in the spending plan.</p>';
 
   const verse=scriptureForMonth(state);
   $('scriptureCard').classList.toggle('hidden',!state.preferences.showScripture || !verse);
@@ -289,30 +300,18 @@ function renderReview() {
     $('providerConfidence').textContent=tx.providerConfidence?`${humanCategory(tx.providerConfidence)} provider confidence`:'No provider confidence supplied';
     $('currentAllocationSummary').innerHTML=allocationSummaryMarkup(transactionAllocationSummary(state,tx.id));
     $('rememberRule').checked=false;
-    const buckets=sortedBuckets(state,true);
-    const suggested=tx.bucketId;
+    const buckets=reviewParentBuckets(state);
+    const suggested=reviewSuggestedParentId(state,tx.bucketId);
     $('reviewBucketChoices').innerHTML=buckets.map(bucket=>`<button class="bucket-choice ${bucket.id===suggested?'suggested':''}" data-bucket="${bucket.id}">
       <span>${escapeHtml(bucketPath(bucket.id))}</span><small>${escapeHtml(bucket.group)}</small></button>`).join('');
-    document.querySelectorAll('.bucket-choice').forEach(button=>button.addEventListener('click',async()=>{
-      const selected=state.domain.buckets.find(item=>item.id===button.dataset.bucket);
-      if (!selected) {
-        try {
-          await applyCanonicalChange(()=>assignBucket(state,tx.id,button.dataset.bucket,$('rememberRule').checked));
-          renderAll();
-        } catch(error) { alert(error.message); }
+    $('reviewBucketChoices').querySelectorAll('.bucket-choice').forEach(button=>button.addEventListener('click',async()=>{
+      const target=reviewAssignmentTarget(state,button.dataset.bucket);
+      if (!target.parent) return;
+      if (target.children.length) {
+        openReviewChildChooser(tx,target.parent);
         return;
       }
-      try {
-        const draft=createAllocationDraft(state,tx.id);
-        const parentId=selected.parentId||selected.id;
-        const subBucketId=selected.parentId?selected.id:null;
-        const row={...draft.rows[0],bucketId:parentId,subBucketId,amountCents:draft.magnitudeCents,ownershipType:'mine'};
-        await saveAllocationDraft(state,tx.id,[row],persist,{
-          markReviewed:true,
-          afterReplace:(nextState,allocations)=>applyRememberedRule(nextState,tx,allocations,$('rememberRule').checked)
-        });
-        renderAll();
-      } catch(error) { alert(error.message); }
+      await saveReviewAssignment(tx,target.parent,null);
     }));
     $('editCurrentAllocation').onclick=()=>openAllocationEditor(tx.id,'review');
   } else {
@@ -326,6 +325,43 @@ function renderReview() {
     }).join('')
     : '<p>No merchant rules yet. Check “Always use this bucket” during review to create one.</p>';
   renderWeekAllocationList();
+}
+
+async function saveReviewAssignment(tx, parent, child) {
+  try {
+    const draft=createAllocationDraft(state,tx.id);
+    const row={...draft.rows[0],bucketId:parent.id,subBucketId:child?.id || null,amountCents:draft.magnitudeCents,ownershipType:'mine'};
+    await saveAllocationDraft(state,tx.id,[row],persist,{
+      markReviewed:true,
+      afterReplace:(nextState,allocations)=>applyRememberedRule(nextState,tx,allocations,$('rememberRule').checked)
+    });
+    closeReviewChildChooser();
+    renderAll();
+  } catch(error) {
+    alert(error.message || 'Could not save this bucket choice. The transaction was unchanged.');
+  }
+}
+
+function openReviewChildChooser(tx, parent) {
+  reviewChildChooser={transactionId:tx.id,parentId:parent.id};
+  const target=reviewAssignmentTarget(state,parent.id);
+  $('reviewChildChooserTitle').textContent=`${parent.name}: choose a sub-bucket`;
+  $('reviewChildChooserMessage').textContent='Choose one sub-bucket to save this assignment. Cancel leaves the transaction unchanged.';
+  $('reviewChildChoices').innerHTML=target.children.map(child=>`<button class="bucket-choice" data-review-child="${escapeAttr(child.id)}"><span>${escapeHtml(child.name)}</span><small>${escapeHtml(parent.group)}</small></button>`).join('');
+  $('reviewChildChoices').querySelectorAll('[data-review-child]').forEach(button=>button.addEventListener('click',()=>{
+    const active=reviewChildChooser;
+    const activeTarget=active && reviewAssignmentTarget(state,active.parentId);
+    const child=activeTarget?.children.find(item=>item.id===button.dataset.reviewChild);
+    const activeTransaction=active && state.review.transactions.find(item=>item.id===active.transactionId);
+    if (activeTarget?.parent && child && activeTransaction) saveReviewAssignment(activeTransaction,activeTarget.parent,child);
+  }));
+  $('reviewChildChooserLayer').classList.remove('hidden');
+  $('reviewChildChooserTitle').focus?.();
+}
+
+function closeReviewChildChooser() {
+  reviewChildChooser=null;
+  $('reviewChildChooserLayer').classList.add('hidden');
 }
 
 function bucketPath(bucketId) {
@@ -478,7 +514,7 @@ async function saveOpenAllocationDraft() {
 function renderBuckets() {
   const includeArchived=$('showArchivedBuckets').checked;
   const parents=listBuckets(state,{includeArchived,parentId:null});
-  const activeParents=listBuckets(state,{parentId:null});
+  const activeParents=listBuckets(state,{parentId:null}).filter(item=>!item.system && item.semanticType==='spending');
   const selectedMonth=state.monthly.selectedMonth;
   const periodFilters={from:`${selectedMonth}-01`,to:`${selectedMonth}-31`};
   $('bucketBoard').innerHTML=parents.length ? parents.map(parent=>{
@@ -490,11 +526,11 @@ function renderBuckets() {
     return `<article class="bucket-family ${parent.active?'':'archived'}" data-id="${parent.id}">
       <div class="bucket-card parent-bucket">
         <button class="icon-button" data-expand="${parent.id}" aria-expanded="${expanded}" aria-label="${expanded?'Collapse':'Expand'} ${escapeAttr(parent.name)}">${expanded?'▾':'▸'}</button>
-        <div class="bucket-identity">${editingBucketId===parent.id?`<form class="bucket-rename-form" data-id="${parent.id}"><label>Bucket name<input name="name" value="${escapeAttr(parent.name)}" required></label><button>Save</button><button type="button" data-cancel-bucket-action>Cancel</button></form>`:`<strong>${escapeHtml(parent.name)}</strong><small>${escapeHtml(parent.group)} · ${children.length} child bucket${children.length===1?'':'s'}${parent.active?'':' · Archived'}</small>`}</div>
-        <div class="bucket-total"><strong>${money(summary.rolledUpCents/100)}</strong><small>${money(summary.directCents/100)} direct · ${money(target)} target · ${money(remaining)} remaining</small></div>
+        <div class="bucket-identity">${editingBucketId===parent.id?`<form class="bucket-rename-form" data-id="${parent.id}"><label>Bucket name<input name="name" value="${escapeAttr(parent.name)}" required></label><button>Save</button><button type="button" data-cancel-bucket-action>Cancel</button></form>`:`<strong>${escapeHtml(parent.name)}</strong><small>${parent.system?'Protected system classification':`${escapeHtml(parent.group)} · ${children.length} child bucket${children.length===1?'':'s'}`}${parent.active?'':' · Archived'}</small>`}</div>
+        <div class="bucket-total"><strong>${money(summary.rolledUpCents/100)}</strong><small>${parent.system?'Excluded from ordinary spending-plan targets':`${money(summary.directCents/100)} direct · ${money(target)} target · ${money(remaining)} remaining`}</small></div>
         <div class="bucket-actions">
-          <button data-detail="${parent.id}">View</button><button data-rename="${parent.id}">Rename</button>
-          <button data-order="up" data-id="${parent.id}" aria-label="Move ${escapeAttr(parent.name)} up">↑</button><button data-order="down" data-id="${parent.id}" aria-label="Move ${escapeAttr(parent.name)} down">↓</button>
+          <button data-detail="${parent.id}">View</button>${parent.system?'':`<button data-rename="${parent.id}">Rename</button>
+          <button data-order="up" data-id="${parent.id}" aria-label="Move ${escapeAttr(parent.name)} up">↑</button><button data-order="down" data-id="${parent.id}" aria-label="Move ${escapeAttr(parent.name)} down">↓</button>`}
           ${parent.protected?'':parent.active?(archivingBucketId===parent.id?`<button data-confirm-archive="${parent.id}">Confirm archive</button><button data-cancel-bucket-action>Cancel</button>`:`<button data-request-archive="${parent.id}" aria-label="Archive ${escapeAttr(parent.name)}">Archive</button>`):`<button data-restore="${parent.id}" aria-label="Restore ${escapeAttr(parent.name)}">Restore</button>`}
         </div>
       </div>
@@ -503,7 +539,7 @@ function renderBuckets() {
           const childSummary=queryBucketDetail(state,child.id,periodFilters);
           return `<div class="bucket-card child-bucket"><span class="tree-line" aria-hidden="true">↳</span><div class="bucket-identity">${editingBucketId===child.id?`<form class="bucket-rename-form" data-id="${child.id}"><label>Bucket name<input name="name" value="${escapeAttr(child.name)}" required></label><button>Save</button><button type="button" data-cancel-bucket-action>Cancel</button></form>`:`<strong>${escapeHtml(child.name)}</strong><small>${child.active?'Child bucket':'Archived child'}</small>`}</div><div class="bucket-total"><strong>${money(childSummary.rolledUpCents/100)}</strong><small>${childSummary.transactionCount} transaction${childSummary.transactionCount===1?'':'s'} · ${money(child.targetCents/100)} target</small></div><div class="bucket-actions"><button data-detail="${child.id}">View</button><button data-rename="${child.id}">Rename</button><button data-order="up" data-id="${child.id}" aria-label="Move ${escapeAttr(child.name)} up">↑</button><button data-order="down" data-id="${child.id}" aria-label="Move ${escapeAttr(child.name)} down">↓</button>${movingChildId===child.id?`<label class="move-parent-label">Parent<select data-move-target="${child.id}">${activeParents.filter(item=>item.id!==child.parentId).map(item=>`<option value="${item.id}">${escapeHtml(item.name)}</option>`).join('')}</select></label><button data-confirm-move="${child.id}">Save move</button><button data-cancel-bucket-action>Cancel</button>`:`<button data-move-child="${child.id}">Move</button>`}${child.active?(archivingBucketId===child.id?`<button data-confirm-archive="${child.id}">Confirm archive</button><button data-cancel-bucket-action>Cancel</button>`:`<button data-request-archive="${child.id}" aria-label="Archive ${escapeAttr(child.name)}">Archive</button>`):`<button data-restore="${child.id}" aria-label="Restore ${escapeAttr(child.name)}">Restore</button>`}</div></div>`;
         }).join('')}
-        ${parent.active?`<form class="child-bucket-form" data-parent="${parent.id}"><label>New child bucket<input name="name" required placeholder="Child bucket name"></label><label>Monthly target<input name="target" type="number" min="0" step="1" placeholder="0"></label><button>Add child</button></form>`:''}
+        ${parent.active&&!parent.system?`<form class="child-bucket-form" data-parent="${parent.id}"><label>New child bucket<input name="name" required placeholder="Child bucket name"></label><label>Monthly target<input name="target" type="number" min="0" step="1" placeholder="0"></label><button>Add child</button></form>`:''}
       </div>
     </article>`;
   }).join('') : '<div class="panel"><p>No parent buckets yet.</p></div>';
@@ -773,8 +809,13 @@ function bindEvents() {
   });
   $('cancelAllocationEditor').addEventListener('click',discardAllocationDraft);
   $('saveAllocationEditor').addEventListener('click',saveOpenAllocationDraft);
+  $('cancelReviewChildChooser').addEventListener('click',closeReviewChildChooser);
   window.addEventListener('beforeunload',event=>{if(allocationDraftDirty){event.preventDefault();event.returnValue='';}});
-  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&allocationDraft)discardAllocationDraft();});
+  document.addEventListener('keydown',event=>{
+    if (event.key!=='Escape') return;
+    if (reviewChildChooser) closeReviewChildChooser();
+    else if (allocationDraft) discardAllocationDraft();
+  });
   $('importCsv').addEventListener('click',()=>$('csvFile').click());
   $('settingsImport').addEventListener('click',()=>$('csvFile').click());
   $('csvFile').addEventListener('change',()=>importSelectedFile($('csvFile').files[0]));
@@ -924,15 +965,23 @@ async function routeAfterAuthChange(session) {
 }
 
 async function boot() {
+  if (startupFailure) {
+    globalThis.moneyMovesStartup?.fail('Money Moves could not access its secure desktop connection. Your encrypted vault was not changed. Quit and reopen the app. If this continues, reinstall this build before attempting vault recovery.');
+    return;
+  }
   bindEvents();
   if (isDesktop) {
     $('signOutNow').classList.add('hidden');
     $('notConfiguredPanel').classList.add('hidden');
     try {
-      const has = await stateService.hasVault();
+      const has = await inspectDesktopVault(() => stateService.hasVault());
       updateLocalRecoveryDisclosure(stateService.localRecoveryStatus());
-      showPanel(has ? 'unlock' : 'setup');
+      showPanel(desktopVaultScreen(has));
     } catch (error) {
+      if (error?.code === 'STARTUP_TIMEOUT') {
+        globalThis.moneyMovesStartup?.fail('Money Moves is taking too long to inspect the encrypted local vault. Your vault was not changed. Quit and reopen the app. If this continues, use a known encrypted backup only after obtaining support.');
+        return;
+      }
       setMessage('lockMessage', error?.code === 'VAULT_CORRUPT'
         ? 'The local encrypted vault needs recovery. Use a saved .mmvault backup in the browser prototype migration flow.'
         : 'Money Moves could not inspect the local encrypted vault.', true);

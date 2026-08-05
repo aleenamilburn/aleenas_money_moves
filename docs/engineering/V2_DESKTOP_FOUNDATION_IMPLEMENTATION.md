@@ -14,7 +14,7 @@ The prior hosted correction was preserved separately at `c591368`. Hosted Supaba
 
 ## 2. Process architecture and security
 
-`electron/main.js` owns Electron lifecycle, a single-instance lock, custom `money-moves://app` content protocol, native file dialogs, safe external Google-search opening, IPC sender validation, and encrypted envelope files. `electron/preload.js` exposes an immutable `window.moneyMovesDesktop` API with only vault inspection/read/create/save/restore/export/import and app version/platform/open-external methods. It does not expose `ipcRenderer`, generic invoke, filesystem paths, Node, Electron internals, process data, or shell access.
+`electron/main.js` owns Electron lifecycle, a single-instance lock, custom `money-moves://app` content protocol, native file dialogs, safe external Google-search opening, IPC sender validation, and encrypted envelope files. `electron/preload.cjs` exposes an immutable `window.moneyMovesDesktop` API with only vault inspection/read/create/save/restore/export/import and app version/platform/open-external methods. It does not expose `ipcRenderer`, generic invoke, filesystem paths, Node, Electron internals, process data, or shell access.
 
 The renderer dynamically selects `js/services/desktopVaultRepository.js`; it continues to encrypt/decrypt, migrate, validate, and execute the existing financial services in memory. The desktop adapter does not import hosted Supabase code.
 
@@ -44,7 +44,7 @@ Existing browser/hosted prototype users migrate through: encrypted browser backu
 
 ## 5. Packaging and content controls
 
-Electron 43.3.0 and Electron Forge 7.11.2 are pinned. Forge produces an ARM64 macOS app bundle, ZIP, and unsigned development DMG with ASAR enabled. The configured packager ignores browser test fixtures, hosted/supabase material, docs, source maps, personal/development cache folders, local configs, and sample files. `scripts/inspect-package.mjs` scans both emitted filesystem assets and `app.asar`, including the empty-seed check.
+Electron 43.3.0 and Electron Forge 7.11.2 are pinned. Forge produces an ARM64 macOS app bundle, ZIP, and unsigned development DMG with ASAR enabled. The configured packager ignores browser test fixtures, hosted/supabase material, docs, source maps, personal/development cache folders, local configs, and sample files. `scripts/inspect-package.mjs` scans both emitted filesystem assets and `app.asar`, including the empty-seed check. The founder-approved canonical icon source is `assets/brand/money-moves-mark.png`, a self-contained sanitized 2000-pixel RGBA image that preserves the approved transparency and canvas/padding. `scripts/install-founder-icon.mjs` removes C2PA, EXIF, and text chunks while retaining only the original PNG image chunks. `scripts/generate-macos-icon.mjs` derives the checked-in 16–1024 PNGs and multi-size ICNS used by Forge for the app and DMG.
 
 Future signing/notarization hooks are intentionally not configured with credentials. Add Developer ID signing, hardened runtime, entitlements, and notarization only in a release-readiness phase.
 
@@ -58,18 +58,24 @@ Commands run during implementation:
 
 ```text
 CI=true pnpm run check                         passed
-CI=true pnpm run electron:test                 23 passed, 0 failed
-CI=true pnpm test                              163 passed, 0 failed
+CI=true pnpm run electron:test                 27 passed, 0 failed
+CI=true pnpm test                              172 passed, 0 failed
 PYTHONPYCACHEPREFIX=/private/tmp/money_moves_pycache python3 -m py_compile start.py  passed
 CI=true pnpm run electron:package              passed (ARM64 macOS app)
 CI=true pnpm run electron:make                 passed (unsigned DMG and ZIP)
-CI=true pnpm run inspect:package               passed (286 files, 25 archive entries)
+CI=true pnpm run inspect:package               passed (286 files, 42 archive entries)
 ```
 
 The independent acceptance record regenerated the package/DMG, verified the fuse
 bytes and ASAR contents, and completed controlled synthetic packaged-app and
-mounted-DMG workflows. See `V2_DESKTOP_FOUNDATION_ACCEPTANCE.md` for the
-remaining low-risk native-dialog follow-up.
+mounted-DMG workflows. The post-acceptance startup correction verified the
+obsolete installed ESM preload as the founder-screen root cause, adds a bounded
+startup fallback, and unifies the macOS/in-app mark. The final packaging pass
+verified the icon dimensions and that the direct bundle, DMG, and ZIP all carry
+the same ICNS. Both the direct bundle and a read-only mounted-DMG app created a
+Money Moves window using disposable profiles. See
+`V2_DESKTOP_FOUNDATION_ACCEPTANCE.md` for the remaining founder
+visual/native-dialog matrix.
 
 ## 7. Known limitations and acceptance recommendation
 

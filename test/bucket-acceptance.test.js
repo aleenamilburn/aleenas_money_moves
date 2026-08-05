@@ -54,7 +54,7 @@ test('acceptance: V1 categories and totals migrate one-for-one without mutation 
   const second = migrateState(first.state, {now});
 
   assert.deepEqual(source, before);
-  assert.equal(first.state.domain.buckets.length, source.categories.length);
+  assert.equal(first.state.domain.buckets.length, source.categories.length + 3);
   for (const category of source.categories) {
     const bucket = first.state.domain.buckets.find(item => item.id === category.id);
     assert.ok(bucket);

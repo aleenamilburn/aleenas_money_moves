@@ -1,4 +1,4 @@
-import {DEFAULT_CURRENCY, UNKNOWN_ACCOUNT_ID} from './constants.js';
+import {BUCKET_SEMANTIC_TYPES, DEFAULT_CURRENCY, UNKNOWN_ACCOUNT_ID} from './constants.js';
 
 export const ACCOUNT_TYPES = new Set(['cash', 'credit', 'loan', 'savings', 'investment', 'unknown']);
 export const TRANSACTION_SOURCES = new Set(['manual', 'csv', 'migration']);
@@ -181,7 +181,7 @@ function validateLegacyTransaction(value) {
   return validateTransaction(candidate);
 }
 
-export function validateBucket(value) {
+export function validateBucket(value, {legacySemanticType = false} = {}) {
   const errors = [];
   if (!validateBaseEntity(value, 'Bucket', errors)) return validationResult('Bucket', value, errors);
   optionalString(value.parentId, 'parentId', errors);
@@ -191,6 +191,10 @@ export function validateBucket(value) {
   requiredInteger(value.targetCents, 'targetCents', errors, {min:0});
   requiredBoolean(value.protected, 'protected', errors);
   requiredBoolean(value.active, 'active', errors);
+  if (!legacySemanticType) {
+    requiredEnum(value.semanticType, 'semanticType', BUCKET_SEMANTIC_TYPES, errors);
+    requiredBoolean(value.system, 'system', errors);
+  }
   optionalString(value.description, 'description', errors);
   optionalDate(value.archivedAt, 'archivedAt', errors);
   return validationResult('Bucket', value, errors);
@@ -327,12 +331,12 @@ export function assertValid(result) {
   return result.value;
 }
 
-export function validateBucketTree(buckets) {
+export function validateBucketTree(buckets, {legacySemanticType = false} = {}) {
   const errors = [];
   if (!Array.isArray(buckets)) return validationResult('BucketTree', buckets, ['buckets must be an array']);
   const byId = new Map();
   for (const bucket of buckets) {
-    const result = validateBucket(bucket);
+    const result = validateBucket(bucket, {legacySemanticType});
     if (!result.ok) errors.push(...result.errors.map(error => `${bucket?.id || 'unknown'}: ${error}`));
     else if (byId.has(bucket.id)) errors.push(`duplicate bucket id: ${bucket.id}`);
     else byId.set(bucket.id, bucket);
@@ -381,7 +385,7 @@ function validateCollection(domain, field, validator, errors, {validateItems = t
   }
 }
 
-function validateBaseRelationships(domain, errors) {
+function validateBaseRelationships(domain, errors, {legacySemanticType = false} = {}) {
   const accountIds = new Set(domain.accounts.map(account => account.id));
   const transactionIds = new Set(domain.transactions.map(transaction => transaction.id));
   const bucketIds = new Set(domain.buckets.map(bucket => bucket.id));
@@ -409,7 +413,7 @@ function validateBaseRelationships(domain, errors) {
       errors.push(`merchant rule ${rule.id} targets missing bucket ${rule.action.bucketId}`);
     }
   }
-  const tree = validateBucketTree(domain.buckets);
+  const tree = validateBucketTree(domain.buckets, {legacySemanticType});
   if (!tree.ok) errors.push(...tree.errors);
 }
 
@@ -597,13 +601,13 @@ function validateReimbursementRelationships(domain, errors) {
   }
 }
 
-export function validateDomainStore(domain, {legacyReimbursements = false} = {}) {
+export function validateDomainStore(domain, {legacyReimbursements = false, legacySemanticType = false} = {}) {
   const errors = [];
   if (!isPlainObject(domain)) return validationResult('DomainStore', domain, ['domain must be an object']);
   for (const [field, validator] of [
     ['accounts', validateAccount],
     ['transactions', legacyReimbursements ? validateLegacyTransaction : validateTransaction],
-    ['buckets', validateBucket],
+    ['buckets', value => validateBucket(value, {legacySemanticType})],
     ['allocations', validateAllocation],
     ['merchantRules', validateMerchantRule]
   ]) validateCollection(domain, field, validator, errors);
@@ -622,7 +626,7 @@ export function validateDomainStore(domain, {legacyReimbursements = false} = {})
     ]) validateCollection(domain, field, validator, errors);
   }
   if (errors.length) return validationResult('DomainStore', domain, errors);
-  validateBaseRelationships(domain, errors);
+  validateBaseRelationships(domain, errors, {legacySemanticType});
   if (!legacyReimbursements) validateReimbursementRelationships(domain, errors);
   return validationResult('DomainStore', domain, errors);
 }

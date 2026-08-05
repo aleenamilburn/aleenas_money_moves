@@ -21,6 +21,10 @@ const cents = value => Math.round(Math.abs(Number(value || 0)) * 100);
 const clean = value => String(value || '').trim();
 const nowIso = value => value || new Date().toISOString();
 
+export function bucketSemanticType(item) {
+  return item?.semanticType || 'spending';
+}
+
 function domain(state) {
   if (!state?.domain || !Array.isArray(state.domain.buckets)) throw new BucketOperationError('Bucket data is unavailable.', 'INVALID_STATE');
   return state.domain;
@@ -80,7 +84,9 @@ function syncLegacyBucket(state, item) {
     active:item.active,
     archivedAt:item.archivedAt,
     description:item.description,
-    protected:item.protected
+    protected:item.protected,
+    semanticType:bucketSemanticType(item),
+    system:Boolean(item.system)
   });
 }
 
@@ -100,6 +106,7 @@ export function createBucket(state, input, options = {}) {
   if (parentId) {
     const parent = bucket(state, parentId);
     if (parent.parentId) throw new BucketOperationError('A child bucket cannot contain another child bucket.', 'MAX_DEPTH');
+    if (parent.system || bucketSemanticType(parent) !== 'spending') throw new BucketOperationError('System classifications cannot have child buckets.', 'SYSTEM_CLASSIFICATION');
     if (!parent.active) throw new BucketOperationError('Restore the parent bucket before adding a child.', 'PARENT_ARCHIVED');
   }
   assertUniqueName(state, input.name, parentId);
@@ -108,7 +115,7 @@ export function createBucket(state, input, options = {}) {
     id:options.id || stableId(state, input.name, parentId), parentId, name:clean(input.name),
     group:clean(input.group) || (parentId ? bucket(state, parentId).group : 'Wants'),
     order:nextOrder(state, parentId), targetCents:Math.max(0, Number.isSafeInteger(input.targetCents) ? input.targetCents : cents(input.target)),
-    protected:Boolean(input.protected), active:true, description:clean(input.description) || null, archivedAt:null,
+    protected:Boolean(input.protected), semanticType:'spending', system:false, active:true, description:clean(input.description) || null, archivedAt:null,
     createdAt:timestamp, updatedAt:timestamp
   };
   domain(state).buckets.push(item);
@@ -119,6 +126,15 @@ export function createBucket(state, input, options = {}) {
 
 export function updateBucket(state, id, patch, options = {}) {
   const item = bucket(state, id);
+  if (patch.semanticType !== undefined && patch.semanticType !== bucketSemanticType(item)) {
+    throw new BucketOperationError('A bucket classification cannot be converted after it is created.', 'SEMANTIC_TYPE_IMMUTABLE');
+  }
+  if (patch.system !== undefined && Boolean(patch.system) !== Boolean(item.system)) {
+    throw new BucketOperationError('A bucket cannot be converted to or from a system classification.', 'SYSTEM_CLASSIFICATION_IMMUTABLE');
+  }
+  if (item.system && ['name', 'group', 'targetCents', 'description'].some(field => patch[field] !== undefined)) {
+    throw new BucketOperationError('System classifications are protected and cannot be edited.', 'SYSTEM_CLASSIFICATION');
+  }
   if (patch.name !== undefined) assertUniqueName(state, patch.name, item.parentId, id);
   if (patch.name !== undefined) item.name = clean(patch.name);
   if (patch.group !== undefined) item.group = clean(patch.group) || item.group;
@@ -146,6 +162,7 @@ export function moveChildBucket(state, id, newParentId, options = {}) {
   if (!item.parentId) throw new BucketOperationError('Only child buckets can be moved between parents.', 'NOT_CHILD');
   const parent = bucket(state, newParentId);
   if (parent.parentId || parent.id === item.id) throw new BucketOperationError('Child buckets can only move to a top-level parent.', 'MAX_DEPTH');
+  if (parent.system || bucketSemanticType(parent) !== 'spending') throw new BucketOperationError('A child cannot be moved into a system classification.', 'SYSTEM_CLASSIFICATION');
   if (!parent.active) throw new BucketOperationError('Restore the destination parent before moving a child.', 'PARENT_ARCHIVED');
   assertUniqueName(state, item.name, parent.id, item.id);
   const oldParentId = item.parentId;
@@ -186,7 +203,10 @@ export function isBucketReferenced(state, id) {
 }
 
 export function deleteBucket(state, id) {
-  bucket(state, id);
+  const item = bucket(state, id);
+  if (item.protected || item.system || bucketSemanticType(item) !== 'spending') {
+    throw new BucketOperationError('This protected classification cannot be deleted.', 'PROTECTED');
+  }
   if (isBucketReferenced(state, id)) throw new BucketOperationError('This bucket has history or rules and cannot be deleted. Archive it instead.', 'BUCKET_REFERENCED');
   throw new BucketOperationError('Buckets are archived, not deleted, so stable identifiers and history are preserved.', 'ARCHIVE_REQUIRED');
 }
@@ -221,6 +241,42 @@ export function bucketLedgerRows(state) {
   const canonical = canonicalAllocationRows(state);
   const canonicalIds = new Set(canonical.map(row => row.transactionId));
   return [...canonical, ...legacyRows(state, canonicalIds)];
+}
+
+// Every allocation row is counted once. A child allocation contributes to that
+// child and its immediate parent, while a direct allocation contributes only to
+// its parent. This keeps parent totals traceable without double-counting spend.
+export function aggregateMonthlyBucketActivity(state, month) {
+  const actualsCents = {};
+  let spendCents = 0;
+  let incomeCents = 0;
+  let debtPaymentCents = 0;
+  let reviewedSpendCents = 0;
+  let provisionalSpendCents = 0;
+  const buckets = new Map(domain(state).buckets.map(item => [item.id, item]));
+  for (const row of bucketLedgerRows(state)) {
+    if (!String(row.date || '').startsWith(`${month}-`)) continue;
+    const parent = buckets.get(row.parentBucketId);
+    const semanticType = bucketSemanticType(parent);
+    if (semanticType === 'income') {
+      incomeCents += row.amountCents;
+      continue;
+    }
+    if (semanticType === 'transfer') continue;
+    if (semanticType === 'debt_payment') {
+      debtPaymentCents += row.amountCents;
+      continue;
+    }
+    const amountCents = row.amountCents;
+    actualsCents[row.assignedBucketId] = (actualsCents[row.assignedBucketId] || 0) + amountCents;
+    if (row.parentBucketId && row.parentBucketId !== row.assignedBucketId) {
+      actualsCents[row.parentBucketId] = (actualsCents[row.parentBucketId] || 0) + amountCents;
+    }
+    spendCents += amountCents;
+    if (row.reviewStatus === 'reviewed') reviewedSpendCents += amountCents;
+    else provisionalSpendCents += amountCents;
+  }
+  return {actualsCents, spendCents, incomeCents, debtPaymentCents, reviewedSpendCents, provisionalSpendCents};
 }
 
 function matches(row, filters) {

@@ -42,7 +42,7 @@ function addRepaymentTransaction(domain, {id = 'repayment-target', amountCents =
   });
 }
 
-test('schema 6 to 7 initializes canonical collections and is clone-first, deterministic, and idempotent', () => {
+test('schema 6 to 8 initializes canonical collections and is clone-first, deterministic, and idempotent', () => {
   const source = fixtures.empty();
   const before = structuredClone(source);
   const first = migrateState(source, {now:migrationNow});
@@ -51,16 +51,16 @@ test('schema 6 to 7 initializes canonical collections and is clone-first, determ
 
   assert.deepEqual(source, before);
   assert.equal(first.fromVersion, 6);
-  assert.equal(first.toVersion, 7);
+  assert.equal(first.toVersion, 8);
   assert.equal(first.state.schemaVersion, STATE_SCHEMA_VERSION);
-  assert.deepEqual(first.applied, ['v2a-reimbursement-relationship-foundation']);
+  assert.deepEqual(first.applied, ['v2a-reimbursement-relationship-foundation', 'v2b-desktop-beta-bucket-workflow']);
   assert.deepEqual(first.state, sameInput.state);
   assert.equal(repeated.changed, false);
   assert.deepEqual(repeated.state, first.state);
   for (const field of ['reimbursementClaims', 'reimbursementClaimAllocations', 'reimbursementPaymentLinks', 'reimbursementAdjustments', 'auditEvents']) {
     assert.deepEqual(first.state.domain[field], []);
   }
-  assert.equal(first.state.migration.appliedMigrations.at(-1), 'v2a-reimbursement-relationship-foundation');
+  assert.equal(first.state.migration.appliedMigrations.at(-1), 'v2b-desktop-beta-bucket-workflow');
   assert.deepEqual(first.state.migration.reimbursementSchema7, {convertedClaimCount:0, unresolvedClaimCount:0});
 });
 
@@ -209,7 +209,7 @@ test('legacy shared and excluded ownership and unrelated state survive without c
 });
 
 test('future schema versions remain rejected', () => {
-  assert.throws(() => migrateState(fixtures.futureSchema()), /newer than supported schema 7/);
+  assert.throws(() => migrateState(fixtures.futureSchema()), /newer than supported schema 8/);
 });
 
 test('claim validation rejects missing payer, invalid currency, unpaired cancellation, and schema-6 authority fields', () => {

@@ -4,14 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
   <title>Money Moves</title>
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
   <div class="lock-layer show" id="lockLayer">
     <div class="lock-card">
-      <div class="lock-mark">MM</div>
+      <img class="lock-mark" src="assets/brand/money-moves-mark.png" alt="Money Moves">
+      <section id="startupPanel" class="lock-panel">
+        <p class="eyebrow">STARTING SECURELY</p>
+        <h1>Opening your encrypted vault</h1>
+        <p>Money Moves is checking this Mac’s encrypted vault. It will not change the vault during startup.</p>
+      </section>
+      <section id="startupFailurePanel" class="lock-panel hidden" role="alert">
+        <p class="eyebrow">STARTUP NEEDS ATTENTION</p>
+        <h1>Money Moves could not start safely</h1>
+        <p id="startupFailureMessage">Your encrypted vault was not changed. Quit and reopen the app. If this continues, reinstall this build before attempting vault recovery.</p>
+      </section>
       <section id="notConfiguredPanel" class="lock-panel hidden">
         <p class="eyebrow">SETUP NEEDED</p>
         <h1>Vault recovery needed</h1>
@@ -55,7 +65,7 @@
   <div class="app-shell" id="appShell" aria-hidden="true">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">MM</div>
+        <img class="brand-mark" src="assets/brand/money-moves-mark.png" alt="Money Moves">
         <div><strong>Money</strong><span>Moves</span></div>
       </div>
       <nav id="mainNav">
@@ -158,8 +168,12 @@
                 <span>Provider suggested</span><strong id="providerCategory"></strong><small id="providerConfidence"></small>
               </div>
               <label class="remember-rule"><input type="checkbox" id="rememberRule"> Always use this bucket for this merchant</label>
-              <div class="bucket-choices" id="reviewBucketChoices"></div>
-              <button type="button" id="editCurrentAllocation" class="wide-button">Split or edit allocation</button>
+              <section class="review-transaction-actions" aria-label="Transaction review actions">
+                <div class="bucket-choices" id="reviewBucketChoices"></div>
+                <div class="review-secondary-actions">
+                  <button type="button" id="editCurrentAllocation">Split or edit allocation</button>
+                </div>
+              </section>
             </div>
           </article>
           <aside class="stack">
@@ -304,7 +318,16 @@
     </section>
   </div>
 
+  <div id="reviewChildChooserLayer" class="allocation-editor-layer hidden">
+    <section class="allocation-editor review-child-chooser" role="dialog" aria-modal="true" aria-labelledby="reviewChildChooserTitle" aria-describedby="reviewChildChooserMessage">
+      <div class="panel-head"><div><p class="eyebrow">CHOOSE A SUB-BUCKET</p><h2 id="reviewChildChooserTitle" tabindex="-1">Choose a sub-bucket</h2><p id="reviewChildChooserMessage">Your transaction will remain unchanged until you choose one.</p></div></div>
+      <div id="reviewChildChoices" class="bucket-choices"></div>
+      <div class="allocation-editor-actions end"><button type="button" id="cancelReviewChildChooser">Cancel</button></div>
+    </section>
+  </div>
+
   <script src="data.js"></script>
+  <script src="js/startup-status.js"></script>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

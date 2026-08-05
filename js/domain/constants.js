@@ -1,7 +1,24 @@
 export const PRODUCT_NAME = 'Money Moves';
-export const STATE_SCHEMA_VERSION = 7;
+export const STATE_SCHEMA_VERSION = 8;
 export const DEFAULT_CURRENCY = 'USD';
 export const UNKNOWN_ACCOUNT_ID = 'unknown-account';
+
+// These values describe how a top-level bucket affects financial totals. They are
+// deliberately explicit rather than inferred from a bucket name: a user bucket
+// named "Income" is still ordinary spending unless it carries the reserved
+// classification below.
+export const BUCKET_SEMANTIC_TYPES = new Set(['spending', 'income', 'transfer', 'debt_payment']);
+export const SYSTEM_BUCKET_IDS = Object.freeze({
+  income:'mm-system-income',
+  transfer:'mm-system-money-transfer',
+  debtPayment:'mm-system-debt-payment'
+});
+
+export const STARTER_SPENDING_BUCKETS = Object.freeze([
+  {id:'mm-starter-housing', name:'Housing', group:'Essentials'},
+  {id:'mm-starter-food', name:'Food', group:'Essentials'},
+  {id:'mm-starter-transportation', name:'Transportation', group:'Essentials'}
+]);
 
 // V2_VAULT_KEY, V2_TEMP_VAULT_KEY, and V2_VAULT_WRITE_LEASE_KEY (former localStorage
 // keys for the active vault, its in-flight temp record, and the persisted write

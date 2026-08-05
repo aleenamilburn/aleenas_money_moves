@@ -6,6 +6,10 @@ A desktop-first, encrypted personal finance application for macOS private beta.
 
 Install the unsigned `Money Moves-2.0.0-desktop.0-arm64.dmg` on an Apple-silicon Mac, then open **Money Moves**. Gatekeeper may require an explicit local approval because this development build is not signed or notarized.
 
+The application, Finder/Dock, and DMG use the same canonical Money Moves mark.
+On first launch, a short **Opening your encrypted vault** screen is expected;
+it safely becomes Create Vault, Unlock Vault, or a clear recovery-safe error.
+
 For source development only:
 
 ```bash
@@ -25,15 +29,15 @@ To move data from the older browser prototype, first export its encrypted backup
 
 Create a passphrase with at least 12 characters. It encrypts the local vault and is not recoverable. Keep one or more encrypted `.mmvault` backups separately; each still requires the correct passphrase.
 
-This release preserves the current user workflows, schema-7 migrations, IDs, buckets, allocations, reimbursement services, audit history, V1 recovery compatibility, and integer-cent accounting. It does not contain bank credentials, access tokens, cloud backup, or a live bank connection.
+This release preserves the current user workflows, schema-8 migrations, IDs, buckets, allocations, reimbursement services, audit history, V1 recovery compatibility, and integer-cent accounting. New empty vaults start with editable Housing, Food, and Transportation buckets, plus protected Income, Money Transfer, and Debt Payment classifications. It does not contain bank credentials, access tokens, cloud backup, or a live bank connection.
 
 ## Desktop foundation status
 
-The Electron shell, encrypted local-file repository, atomic replacement, generation conflict checks, manual encrypted backup/restore, single-instance behavior, package inspection, and unsigned macOS DMG are accepted with low-risk follow-ups. Complete one manual native-dialog export/import/restore check on a beta Mac before broad distribution. Hosted live vault synchronization is deferred and not accepted.
+The Electron shell, encrypted local-file repository, atomic replacement, generation conflict checks, manual encrypted backup/restore, single-instance behavior, package inspection, founder-approved unified app icon, and unsigned macOS DMG are accepted with low-risk follow-ups. Complete the founder’s packaged native-dialog and workflow matrix on a beta Mac before broad distribution. Hosted live vault synchronization is deferred and not accepted.
 
 ## Monthly rollover
 
-At launch, the app checks the computer’s local month. A new month is selected automatically while bucket order, targets, rules, travel history, and preferences carry forward. The existing V1 UI retains its current local calculations.
+At launch, the app checks the computer’s local month. A fresh or invalid month selection uses that local month, while an explicit valid historical selection remains selected. Bucket order, targets, rules, travel history, and preferences carry forward. Overview totals roll direct and immediate-child allocations up to their parent exactly once.
 
 The app cannot fetch transactions while closed. The V2 import workflow is intentionally out of scope for this foundation release.
 

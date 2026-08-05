@@ -15,7 +15,7 @@ beforeEach(() => installBrowserGlobals());
 
 test('V1 bucket fixture migrates in stable order without losing legacy fields', () => {
   const state = migrated();
-  assert.deepEqual(listBuckets(state, {parentId:null}).map(item => item.id), ['travel', 'food']);
+  assert.deepEqual(listBuckets(state, {parentId:null}).filter(item => !item.system).map(item => item.id), ['travel', 'food']);
   assert.equal(listBuckets(state, {includeArchived:true, parentId:null})[2].id, 'old');
   assert.equal(state.domain.buckets.find(item => item.id === 'old').active, false);
   assert.equal(state.domain.buckets[0].targetCents, 50000);

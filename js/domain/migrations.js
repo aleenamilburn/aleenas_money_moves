@@ -1,4 +1,4 @@
-import {PRODUCT_NAME, STATE_SCHEMA_VERSION} from './constants.js';
+import {BUCKET_SEMANTIC_TYPES, PRODUCT_NAME, STARTER_SPENDING_BUCKETS, STATE_SCHEMA_VERSION, SYSTEM_BUCKET_IDS} from './constants.js';
 import {createUnknownAccount, validateAuditEvent, validateDomainStore, validateBucket} from './models.js';
 import {canonicalTransactionFromLegacy, deterministicAllocationId} from '../services/allocationService.js';
 import {initializeStateRevision} from '../services/stateRevision.js';
@@ -9,7 +9,8 @@ const FOUNDATION_MIGRATIONS = [
   {from:3, to:4, id:'v2-foundation-canonical-name', migrate:initializeFoundationV4},
   {from:4, to:5, id:'v2a-bucket-explorer-fields', migrate:initializeBucketExplorerFields},
   {from:5, to:6, id:'v2a-transaction-allocations', migrate:migrateTraceableLegacyAssignments},
-  {from:6, to:7, id:'v2a-reimbursement-relationship-foundation', migrate:migrateReimbursementRelationships}
+  {from:6, to:7, id:'v2a-reimbursement-relationship-foundation', migrate:migrateReimbursementRelationships},
+  {from:7, to:8, id:'v2b-desktop-beta-bucket-workflow', migrate:initializeDesktopBetaBucketWorkflow}
 ];
 
 function clone(value) {
@@ -94,7 +95,11 @@ export function resolveMigrationTimestamp(input, providedNow) {
 function assertValidMigrationState(state, phase) {
   if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error(`${phase} state must be an object.`);
   if (state.domain !== undefined) {
-    const validation = validateDomainStore(state.domain, {legacyReimbursements:sourceVersion(state) < 7});
+    const version = sourceVersion(state);
+    const validation = validateDomainStore(state.domain, {
+      legacyReimbursements:version < 7,
+      legacySemanticType:version < 8
+    });
     if (!validation.ok) throw new Error(`${phase} state failed foundation validation: ${validation.errors.join('; ')}`);
   }
 }
@@ -204,6 +209,8 @@ function initializeDomainStore(state, {now}) {
       order:Number.isSafeInteger(bucket.order) ? bucket.order : domain.buckets.length,
       targetCents:toCents(bucket.target),
       protected:Boolean(bucket.protected),
+      semanticType:'spending',
+      system:false,
       active:bucket.active !== false && !bucket.archivedAt,
       description:typeof bucket.description === 'string' ? bucket.description : null,
       archivedAt:bucket.archivedAt || (bucket.active === false ? timestampFor(state, now) : null),
@@ -225,6 +232,89 @@ function initializeDomainStore(state, {now}) {
     domain.legacyBalanceSnapshots.push(balanceSnapshot);
   }
   state.domain = domain;
+  return state;
+}
+
+function hasFreshVaultEvidence(state) {
+  const domain = asObject(state.domain);
+  const domainCollections = [
+    'accounts', 'transactions', 'buckets', 'allocations', 'reimbursementClaims',
+    'reimbursementClaimAllocations', 'reimbursementPaymentLinks', 'reimbursementAdjustments',
+    'merchantRules', 'auditEvents', 'legacyMonthlySnapshots', 'legacyBalanceSnapshots'
+  ];
+  if (domainCollections.some(field => Array.isArray(domain[field]) && domain[field].length > 0)) return false;
+  if (Array.isArray(state.review?.transactions) && state.review.transactions.length > 0) return false;
+  if (Array.isArray(state.review?.buckets) && state.review.buckets.length > 0) return false;
+  if (Array.isArray(state.review?.merchantRules) && state.review.merchantRules.length > 0) return false;
+  if (Array.isArray(state.categories) && state.categories.length > 0) return false;
+  if (Array.isArray(state.legacyV1?.categories) && state.legacyV1.categories.length > 0) return false;
+  if (Array.isArray(state.legacyV1?.reviewBuckets) && state.legacyV1.reviewBuckets.length > 0) return false;
+  return true;
+}
+
+function mirrorBucketToLegacyReview(state, bucket) {
+  state.review = asObject(state.review);
+  state.review.buckets = Array.isArray(state.review.buckets) ? state.review.buckets : [];
+  let legacy = state.review.buckets.find(item => item?.id === bucket.id);
+  if (!legacy) {
+    legacy = {id:bucket.id};
+    state.review.buckets.push(legacy);
+  }
+  Object.assign(legacy, {
+    name:bucket.name, group:bucket.group, target:bucket.targetCents / 100, order:bucket.order,
+    parentId:bucket.parentId, active:bucket.active, archivedAt:bucket.archivedAt,
+    description:bucket.description, protected:bucket.protected, system:bucket.system,
+    semanticType:bucket.semanticType
+  });
+}
+
+function systemBucket(definition, order, now) {
+  return {
+    id:definition.id, parentId:null, name:definition.name, group:'System classification', order,
+    targetCents:0, protected:true, semanticType:definition.semanticType, system:true, active:true,
+    description:definition.description, archivedAt:null, createdAt:now, updatedAt:now
+  };
+}
+
+// Schema 8 only seeds everyday buckets for a genuinely brand-new empty vault.
+// Any legacy review, category, domain, transaction, allocation, rule, snapshot,
+// reimbursement, or audit record prevents seeding. System classifications are
+// added independently with fixed IDs so older vaults gain explicit semantics
+// without using (or converting) names such as "Income" or "Transfer".
+function initializeDesktopBetaBucketWorkflow(state, {now, freshVaultAtStart = false}) {
+  const isFreshVault = freshVaultAtStart;
+  initializeDomainStore(state, {now});
+  const domain = state.domain;
+  for (const bucket of domain.buckets) {
+    bucket.semanticType = BUCKET_SEMANTIC_TYPES.has(bucket.semanticType) ? bucket.semanticType : 'spending';
+    bucket.system = Boolean(bucket.system);
+  }
+
+  if (isFreshVault) {
+    for (const [order, starter] of STARTER_SPENDING_BUCKETS.entries()) {
+      domain.buckets.push({
+        id:starter.id, parentId:null, name:starter.name, group:starter.group, order,
+        targetCents:0, protected:false, semanticType:'spending', system:false, active:true,
+        description:null, archivedAt:null, createdAt:now, updatedAt:now
+      });
+    }
+  }
+
+  const definitions = [
+    {id:SYSTEM_BUCKET_IDS.income, name:'Income', semanticType:'income', description:'Classifies money coming in; it is not a spending-plan bucket.'},
+    {id:SYSTEM_BUCKET_IDS.transfer, name:'Money Transfer', semanticType:'transfer', description:'Classifies movement between your accounts; it is neither income nor spending.'},
+    {id:SYSTEM_BUCKET_IDS.debtPayment, name:'Debt Payment', semanticType:'debt_payment', description:'Classifies debt repayment separately from ordinary discretionary spending.'}
+  ];
+  let nextOrder = Math.max(-1, ...domain.buckets.filter(bucket => !bucket.parentId).map(bucket => Number(bucket.order) || 0)) + 1;
+  for (const definition of definitions) {
+    const existing = domain.buckets.find(bucket => bucket.id === definition.id);
+    if (existing) {
+      Object.assign(existing, systemBucket(definition, existing.order, now));
+    } else {
+      domain.buckets.push(systemBucket(definition, nextOrder++, now));
+    }
+  }
+  for (const bucket of domain.buckets) mirrorBucketToLegacyReview(state, bucket);
   return state;
 }
 
@@ -656,6 +746,7 @@ export function migrateState(input, {now} = {}) {
   }
   const migrationNow = resolveMigrationTimestamp(state, now);
   const fromVersion = sourceVersion(state);
+  const freshVaultAtStart = hasFreshVaultEvidence(state);
   if (fromVersion > STATE_SCHEMA_VERSION) {
     throw new Error(`Vault schema ${fromVersion} is newer than supported schema ${STATE_SCHEMA_VERSION}.`);
   }
@@ -665,7 +756,7 @@ export function migrateState(input, {now} = {}) {
   while (version < STATE_SCHEMA_VERSION) {
     const migration = FOUNDATION_MIGRATIONS.find(item => item.from === version);
     if (!migration) throw new Error(`No migration is available from schema ${version}.`);
-    migration.migrate(state, {now:migrationNow});
+    migration.migrate(state, {now:migrationNow, freshVaultAtStart});
     const metadata = migrationMetadata(state);
     if (!metadata.appliedMigrations.includes(migration.id)) metadata.appliedMigrations.push(migration.id);
     version = migration.to;

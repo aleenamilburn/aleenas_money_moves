@@ -153,7 +153,7 @@ test('explicit V1 adoption migrates and uploads only when no hosted vault exists
   const adopted = await service.adoptLocalVault(passphrase);
   assert.equal(adopted.preservedLocalRecovery, true);
   assert.equal(localStorage.getItem(V1_VAULT_KEY), legacyRaw);
-  assert.equal((await unlock(passphrase)).state.schemaVersion, 7);
+  assert.equal((await unlock(passphrase)).state.schemaVersion, 8);
 });
 
 test('explicit V1 adoption refuses to overwrite an existing hosted vault and leaves both records intact', async () => {

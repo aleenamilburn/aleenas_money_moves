@@ -246,7 +246,7 @@ export const schema6ReimbursementFixtures = {
   },
   futureSchema:() => {
     const state = emptySchema6ReimbursementState();
-    state.schemaVersion = 8;
+    state.schemaVersion = 9;
     return state;
   }
 };

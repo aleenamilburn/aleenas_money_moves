@@ -227,3 +227,90 @@ Apple signing/notarization preparation may begin after the manual native-dialog
 check. Plaid remains blocked until its separately scoped future backend phase;
 encrypted cloud backup, live sync, phone/shared-vault access, and automatic
 updates remain out of scope.
+
+## 15. Packaged startup correction and icon unification (2026-08-05)
+
+### Observed failure and root cause
+
+The founder’s screenshot showed a dark lock screen with only the green `MM`
+mark; no vault screen became visible. The read-only audit of the running
+`/Applications/Money Moves.app` established the root cause: its ASAR contains
+`electron/preload.js`, the original ESM preload. Electron loads a sandboxed
+preload as CommonJS, so that historical package does not expose
+`window.moneyMovesDesktop`. It is an obsolete pre-`70b036b` package, even
+though its marketing version remains `2.0.0-desktop.0`.
+
+The source tree and rebuilt ARM64 app instead contain `electron/preload.cjs`.
+The original preload correction therefore remains the functional fix. This
+follow-up adds an explicit, bounded renderer startup state so a missing bridge,
+module failure, rejected boot operation, or stalled repository inspection can
+never leave only a mark on screen. It never erases, replaces, or recovers a
+vault automatically.
+
+### Correction
+
+- `js/startup-status.js` first displays a temporary secure-startup panel,
+  reports static-script/module failures safely, and turns a startup stall into
+  a clear privacy-safe error after nine seconds.
+- `js/services/desktopStartup.js` routes a clean inspection to **Create
+  Vault**, an existing vault to **Unlock Vault**, fails a missing preload bridge
+  safely, and bounds the desktop repository inspection at eight seconds.
+- The renderer identifies desktop mode from the trusted
+  `money-moves://` protocol as well as the narrow bridge, so it cannot silently
+  fall through to the browser/hosted path when the preload is absent.
+- Removed the ineffective `frame-ancestors` meta-CSP directive, which Chromium
+  warned it ignores. This does not reduce protection; local protocol navigation,
+  `window.open`, webviews, permissions, and remote content remain denied by
+  Electron/main-process controls and the remaining CSP.
+
+### Founder-approved icon finalization
+
+The founder-provided transparent artwork is the single canonical source at
+`assets/brand/money-moves-mark.png`. The checked-in copy is a self-contained
+`2000 × 2000` 8-bit RGBA PNG: it preserves the founder's pixels, transparency,
+canvas, and padding exactly. Its C2PA, EXIF, and text metadata chunks were
+removed before it entered the repository because that non-rendering information
+is not needed to render the approved art.
+
+`scripts/install-founder-icon.mjs` documents the repeatable sanitizing import
+step; neither the application nor its build depends on the Downloads source
+file. It preserves only PNG image chunks (`IHDR`, `IDAT`, and `IEND`), then
+`scripts/generate-macos-icon.mjs` derives 16, 32, 64, 128, 256, 512, and
+1024-pixel PNGs and an ICNS that embeds all seven representations. Forge uses
+that ICNS for the app and DMG window. Electron copies it to the final bundle as
+`electron.icns`; package inspection verifies that it has the complete
+multi-size representation set, includes the canonical PNG, rejects an obsolete
+`electron/preload.js`, and rejects unsafe/personal PNG metadata.
+
+This deliberately replaces the previous simple green `MM` mark. The new icon
+is the dark-teal rounded-square artwork with an upward green arrow and gold
+coin stack supplied by the founder; in-app marks and packaged app assets now
+share that same canonical source instead of diverging.
+
+### Regression and build evidence
+
+- `CI=true pnpm test`: **172** passed, 0 failed.
+- `CI=true pnpm run electron:test`: **27** passed, 0 failed.
+- `CI=true pnpm run check`, Python compilation, and both diff checks passed.
+- `CI=true pnpm run electron:package` and `CI=true pnpm run electron:make`
+  rebuilt the unsigned ARM64 app, DMG, and ZIP.
+- `CI=true pnpm run inspect:package` passed: **286** filesystem files and
+  **42** ASAR entries. It verifies `preload.cjs`, startup fallback modules,
+  canonical PNG safety, empty public seed, asset exclusions, and ICNS sizes.
+- All seven derived PNGs had their requested exact dimensions and the ICNS had
+  `icp4`, `icp5`, `icp6`, `ic07`, `ic08`, `ic09`, and `ic10` representations.
+- The rebuilt direct bundle, read-only mounted DMG app, and extracted ZIP app
+  each matched the canonical ICNS byte-for-byte. The DMG detached cleanly.
+- The direct generated app and the app launched from a read-only mounted DMG
+  each created a Money Moves window with separate disposable user-data profiles
+  and quit cleanly. This is a startup smoke test, not a substitute for the
+  founder workflow matrix below.
+
+The prior installed process was not running before this final packaging pass,
+so it did not block the generated-app launch. The full founder matrix remains
+pending because it requires deliberate native-dialog and visual confirmation;
+no result has been inferred from automation. Finder/Dock/application-switcher
+icon cache behavior also remains a human visual check. Signing/notarization
+remains blocked until those current-artifact manual checks complete. No Plaid,
+cloud backup, live sync, signing, notarization, or other product scope was
+added.

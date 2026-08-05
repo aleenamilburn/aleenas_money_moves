@@ -29,14 +29,14 @@ function transaction() {
 }
 
 function bucket(id, parentId = null) {
-  return {id, parentId, name:id, group:'Needs', order:0, targetCents:1000, protected:false, active:true, createdAt, updatedAt};
+  return {id, parentId, name:id, group:'Needs', order:0, targetCents:1000, protected:false, semanticType:'spending', system:false, active:true, createdAt, updatedAt};
 }
 
 function allocation(id, amountCents) {
   return {id, transactionId:'transaction-1', bucketId:'groceries', subBucketId:null, amountCents, ownershipType:'personal', note:null, reimbursementClaimId:null, createdAt, updatedAt};
 }
 
-test('runtime validators accept each schema-7 foundation model', () => {
+test('runtime validators accept each schema-8 foundation model', () => {
   const claim = {id:'claim-1', payerLabel:'Synthetic payer', currency:'USD', dueDate:null, note:null, cancelledAt:null, cancellationReason:null, createdAt, updatedAt};
   const claimAllocation = {id:'claim-allocation-1', claimId:'claim-1', allocationId:'allocation-1', amountCents:500, createdAt, updatedAt};
   const paymentLink = {id:'payment-1', claimId:'claim-1', inflowTransactionId:'transaction-2', appliedAmountCents:500, source:'user_linked', note:null, voidedAt:null, voidReason:null, createdAt, updatedAt};

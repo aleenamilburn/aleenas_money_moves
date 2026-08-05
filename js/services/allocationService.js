@@ -118,6 +118,23 @@ function bucketSelection(state, selectedId) {
   return selected.parentId ? {bucketId:selected.parentId, subBucketId:selected.id} : {bucketId:selected.id, subBucketId:null};
 }
 
+function bucketSemanticType(bucket) {
+  return bucket?.semanticType || 'spending';
+}
+
+function movementTypeForSemanticType(semanticType) {
+  if (semanticType === 'income') return 'earned_income';
+  if (semanticType === 'transfer') return 'internal_transfer';
+  if (semanticType === 'debt_payment') return 'debt_payment';
+  return 'expense';
+}
+
+function legacyFlowForSemanticType(semanticType) {
+  if (semanticType === 'income') return 'inflow';
+  if (semanticType === 'transfer') return 'transfer';
+  return 'outflow';
+}
+
 function newId(idFactory) {
   const id = typeof idFactory === 'function' ? clean(idFactory()) : '';
   if (!id) throw new AllocationOperationError('Could not create an allocation identifier.', 'INVALID_ALLOCATION_ID');
@@ -185,6 +202,17 @@ export function validateAllocationDraft(state, transactionId, rows) {
     const prior = currentById.get(row.id);
     if (parent?.active === false && (!prior || prior.bucketId !== row.bucketId)) rowErrors[index].push('Choose an active parent bucket.');
     if (child?.active === false && (!prior || prior.subBucketId !== row.subBucketId)) rowErrors[index].push('Choose an active child bucket.');
+    if (bucketSemanticType(parent) !== 'spending') {
+      if (!parent.system) rowErrors[index].push('Only protected system classifications may use a special transaction type.');
+      if (row.subBucketId) rowErrors[index].push('System classifications cannot use a child bucket.');
+    }
+  }
+  const semanticParents = candidateRows.filter(row => {
+    const parent = domain(state).buckets.find(item => item.id === row.bucketId);
+    return bucketSemanticType(parent) !== 'spending';
+  });
+  if (semanticParents.length && candidateRows.length !== 1) {
+    errors.push('Income, money transfers, and debt payments must use one full transaction classification.');
   }
   if (rowErrors.some(items => items.some(message => message === 'Choose a bucket for every allocation.'))) {
     errors.push('Choose a bucket for every allocation.');
@@ -252,9 +280,20 @@ export async function saveAllocationDraft(state, transactionId, rows, persist, o
     const replacements = persistedAllocations(state, transactionId, rows, now);
     d.allocations = [...d.allocations.filter(item => item.transactionId !== transactionId), ...replacements];
 
+    const selectedParent = d.buckets.find(item => item.id === replacements[0].bucketId);
+    const semanticType = bucketSemanticType(selectedParent);
+    if (semanticType !== 'spending') {
+      transaction.movementType = movementTypeForSemanticType(semanticType);
+      transaction.amountCents = semanticType === 'income'
+        ? Math.abs(transaction.amountCents)
+        : -Math.abs(transaction.amountCents);
+      transaction.manualOverrides = {...(transaction.manualOverrides || {}), bucketSemanticType:semanticType};
+    }
+
     const legacy = legacyTransaction(state, transactionId);
     if (legacy) {
       legacy.bucketId = replacements.length === 1 ? (replacements[0].subBucketId || replacements[0].bucketId) : null;
+      if (semanticType !== 'spending') legacy.flow = legacyFlowForSemanticType(semanticType);
       if (options.markReviewed) {
         legacy.reviewStatus = 'reviewed';
         legacy.reviewedAt = now;

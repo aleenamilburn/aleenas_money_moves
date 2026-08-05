@@ -1,16 +1,34 @@
 import {migrateState, resolveMigrationTimestamp} from './domain/migrations.js';
-import {bucketLedgerRows} from './services/bucketService.js';
+import {aggregateMonthlyBucketActivity, bucketSemanticType} from './services/bucketService.js';
 
 const clone = value => JSON.parse(JSON.stringify(value));
 
+export function isValidMonth(value) {
+  return typeof value === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
+}
+
+function localDateParts(date) {
+  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+}
+
+function validCalendarDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(year, month - 1, day, 12);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
 export function monthKey(value = new Date()) {
-  const date = value instanceof Date ? value : new Date(`${String(value).slice(0,10)}T12:00:00`);
-  if (Number.isNaN(date.getTime())) return new Date().toISOString().slice(0,7);
+  if (typeof value === 'string' && isValidMonth(value.slice(0, 7))) return value.slice(0, 7);
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return monthKey(new Date());
   return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}`;
 }
 
 export function monthLabel(value) {
-  const date = new Date(`${value}-01T12:00:00`);
+  const month = isValidMonth(value) ? value : monthKey();
+  const [year, monthNumber] = month.split('-').map(Number);
+  const date = new Date(year, monthNumber - 1, 1, 12);
   return new Intl.DateTimeFormat('en-US',{month:'long',year:'numeric'}).format(date);
 }
 
@@ -27,16 +45,19 @@ export function merchantKey(value) {
 }
 
 export function weekStart(value) {
-  const date = new Date(`${String(value).slice(0,10)}T12:00:00`);
-  if (Number.isNaN(date.getTime())) return null;
+  const calendarDate = String(value).slice(0,10);
+  if (!validCalendarDate(calendarDate)) return null;
+  const [year, month, dayOfMonth] = calendarDate.split('-').map(Number);
+  const date = new Date(year, month - 1, dayOfMonth, 12);
   const day = date.getDay();
   date.setDate(date.getDate() + (day === 0 ? -6 : 1-day));
-  return date.toISOString().slice(0,10);
+  return localDateParts(date);
 }
 
 export function weekLabel(start) {
-  if (!start) return 'No week';
-  const first = new Date(`${start}T12:00:00`);
+  if (!validCalendarDate(start)) return 'No week';
+  const [year, month, day] = start.split('-').map(Number);
+  const first = new Date(year, month - 1, day, 12);
   const last = new Date(first);
   last.setDate(first.getDate()+6);
   const f = new Intl.DateTimeFormat('en-US',{month:'short',day:'numeric'});
@@ -89,7 +110,7 @@ export function normalizeTransaction(raw, state, {defaultTimestamp = new Date().
   };
 }
 
-function hydrateLegacyUiState(input, seed, {now} = {}) {
+function hydrateLegacyUiState(input, seed, {now, currentDate} = {}) {
   const state = clone(input || seed);
   const migrationNow = resolveMigrationTimestamp(state, now);
   state.app = {...clone(seed.app), ...(state.app || {})};
@@ -159,17 +180,14 @@ function hydrateLegacyUiState(input, seed, {now} = {}) {
   state.travel.destinations = Array.isArray(state.travel.destinations) ? state.travel.destinations : [];
   state.scriptures = Array.isArray(state.scriptures) ? state.scriptures : [];
 
-  const current = monthKey(migrationNow);
-  if (state.monthly.lastOpenedMonth !== current) {
-    state.monthly.activeMonth = current;
-    state.monthly.selectedMonth = current;
-    state.monthly.lastOpenedMonth = current;
-  }
-  if (!state.monthly.selectedMonth) state.monthly.selectedMonth = current;
+  const current = monthKey(currentDate === undefined ? new Date() : currentDate);
+  if (!isValidMonth(state.monthly.selectedMonth)) state.monthly.selectedMonth = current;
+  state.monthly.activeMonth = state.monthly.selectedMonth;
+  state.monthly.lastOpenedMonth = current;
 
   const weeks = availableWeeks(state);
   if (!state.review.selectedWeek || !weeks.includes(state.review.selectedWeek)) {
-    state.review.selectedWeek = weeks[0] || weekStart(migrationNow.slice(0,10));
+    state.review.selectedWeek = weeks[0] || weekStart(localDateParts(currentDate instanceof Date ? currentDate : new Date(currentDate || Date.now())));
   }
   if (Array.isArray(state.categories)) {
     state.legacyV1 = state.legacyV1 || {};
@@ -181,8 +199,9 @@ function hydrateLegacyUiState(input, seed, {now} = {}) {
 export function upgradeStateWithMigration(input, seed, options = {}) {
   const original = clone(input || seed);
   const migrationNow = resolveMigrationTimestamp(original, options.now);
+  const currentDate = options.currentDate ?? options.now ?? new Date();
   const firstPass = migrateState(original, {...options, now:migrationNow});
-  const hydrated = hydrateLegacyUiState(firstPass.state, seed, {now:migrationNow});
+  const hydrated = hydrateLegacyUiState(firstPass.state, seed, {now:migrationNow, currentDate});
   const finalPass = migrateState(hydrated, {...options, now:migrationNow});
   return {
     ...finalPass,
@@ -196,11 +215,15 @@ export function upgradeState(input, seed, options = {}) {
   return upgradeStateWithMigration(input, seed, options).state;
 }
 
-export function availableMonths(state) {
-  const months = new Set(state.review.transactions.map(tx => tx.date.slice(0,7)));
-  months.add(monthKey());
-  months.add(state.monthly.selectedMonth);
-  return [...months].filter(Boolean).sort((a,b)=>b.localeCompare(a));
+export function availableMonths(state, {clock = new Date()} = {}) {
+  const months = new Set();
+  for (const tx of [...(state.review?.transactions || []), ...(state.domain?.transactions || [])]) {
+    const month = String(tx.date || tx.displayDate || tx.postedAt || tx.authorizedAt || '').slice(0, 7);
+    if (isValidMonth(month)) months.add(month);
+  }
+  months.add(monthKey(clock));
+  if (isValidMonth(state.monthly?.selectedMonth)) months.add(state.monthly.selectedMonth);
+  return [...months].sort((a,b)=>b.localeCompare(a));
 }
 
 export function availableWeeks(state) {
@@ -311,41 +334,26 @@ export function moveBucket(state,id,direction) {
 }
 
 export function transactionsForMonth(state,month=state.monthly.selectedMonth) {
-  return state.review.transactions.filter(tx=>tx.date.startsWith(month));
+  const selectedMonth=isValidMonth(month) ? month : monthKey();
+  return state.review.transactions.filter(tx=>tx.date.startsWith(`${selectedMonth}-`));
 }
 
 export function monthSummary(state,month=state.monthly.selectedMonth) {
-  const actuals={};
-  let spend=0, income=0, reviewedSpend=0, provisionalSpend=0;
-  const canonicalIds = new Set(state.domain.transactions.map(tx => tx.id));
-  const legacyById = new Map(state.review.transactions.map(tx => [tx.id,tx]));
-  for (const tx of state.domain.transactions) {
-    const date=String(tx.displayDate||tx.postedAt||tx.authorizedAt||'');
-    if (!date.startsWith(month) || tx.amountCents <= 0 || !['earned_income','gift','interest','sale_proceeds','other_inflow'].includes(tx.movementType)) continue;
-    if (tx.reviewStatus==='pending' && legacyById.get(tx.id)?.bucketId!=='income') continue;
-    income+=tx.amountCents/100;
-  }
-  for (const tx of transactionsForMonth(state,month)) {
-    if (canonicalIds.has(tx.id) || tx.flow!=='inflow') continue;
-    if (tx.bucketId==='income' || tx.reviewStatus!=='pending') income+=tx.amount;
-  }
-  for (const row of bucketLedgerRows(state)) {
-    if (!row.date.startsWith(month) || row.movementType!=='expense' || ['transfer','income','excluded'].includes(row.assignedBucketId)) continue;
-    const amount=row.amountCents/100;
-    actuals[row.assignedBucketId]=(actuals[row.assignedBucketId]||0)+amount;
-    if (row.parentBucketId && row.parentBucketId!==row.assignedBucketId) {
-      actuals[row.parentBucketId]=(actuals[row.parentBucketId]||0)+amount;
-    }
-    spend+=amount;
-    if (row.reviewStatus==='reviewed') reviewedSpend+=amount; else provisionalSpend+=amount;
-  }
-  const protectedRemaining=sortedBuckets(state,false)
-    .filter(bucket=>bucket.protected)
-    .reduce((sum,bucket)=>sum+Math.max(0,Number(bucket.target||0)-Number(actuals[bucket.id]||0)),0);
-  const baselineIncome=Number(state.preferences.monthlyIncome || state.providerSnapshot.averageMonthlyIncome || 0);
+  const selectedMonth=isValidMonth(month) ? month : monthKey();
+  const activity=aggregateMonthlyBucketActivity(state, selectedMonth);
+  const actuals=Object.fromEntries(Object.entries(activity.actualsCents).map(([id, cents]) => [id, cents / 100]));
+  const spend=activity.spendCents / 100;
+  const income=activity.incomeCents / 100;
+  const debtPayments=activity.debtPaymentCents / 100;
+  const reviewedSpend=activity.reviewedSpendCents / 100;
+  const provisionalSpend=activity.provisionalSpendCents / 100;
+  const protectedRemaining=(state.domain?.buckets || [])
+    .filter(bucket=>bucket.protected && bucketSemanticType(bucket)==='spending' && bucket.parentId===null && bucket.active!==false)
+    .reduce((sum,bucket)=>sum+Math.max(0,bucket.targetCents/100-Number(actuals[bucket.id]||0)),0);
+  const baselineIncome=Number(state.preferences?.monthlyIncome || state.providerSnapshot?.averageMonthlyIncome || 0);
   return {
-    month, actuals, spend, income, cashFlow:income-spend,
-    safeToSpend:Math.max(0,baselineIncome-spend-protectedRemaining),
+    month:selectedMonth, actuals, spend, income, debtPayments, cashFlow:income-spend-debtPayments,
+    safeToSpend:Math.max(0,baselineIncome-spend-debtPayments-protectedRemaining),
     protectedRemaining, reviewedSpend, provisionalSpend
   };
 }

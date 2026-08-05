@@ -7,6 +7,7 @@ export default {
     appBundleId:'com.moneymoves.desktop',
     name:'Money Moves',
     executable:'Money Moves',
+    icon:'assets/icons/macos/icon.icns',
     ignore:[
       /^\/test($|\/)/,
       /^\/docs($|\/)/,
@@ -36,7 +37,7 @@ export default {
     ]
   },
   makers:[
-    {name:'@electron-forge/maker-dmg', config:{format:'ULFO'}},
+    {name:'@electron-forge/maker-dmg', config:{format:'ULFO', icon:'assets/icons/macos/icon.icns', iconSize:128}},
     {name:'@electron-forge/maker-zip', platforms:['darwin']}
   ],
   plugins:[
