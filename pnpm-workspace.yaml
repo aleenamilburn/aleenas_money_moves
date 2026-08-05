@@ -1,2 +1,9 @@
+blockExoticSubdeps: false
+nodeLinker: hoisted
 allowBuilds:
   esbuild: true
+  electron: true
+  fs-xattr: true
+  macos-alias: true
+minimumReleaseAgeExclude:
+  - electron@43.3.0

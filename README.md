@@ -1,36 +1,35 @@
 # Money Moves
 
-A local-first, encrypted personal finance dashboard for macOS, Windows, and Linux.
+A desktop-first, encrypted personal finance application for macOS private beta.
 
-## Launch on a MacBook Pro
+## Private-beta launch
 
-1. Double-click the ZIP to extract it.
-2. Open the extracted Money Moves folder.
-3. Double-click `start.command` if present, or open Terminal in the folder and run:
+Install the unsigned `Money Moves-2.0.0-desktop.0-arm64.dmg` on an Apple-silicon Mac, then open **Money Moves**. Gatekeeper may require an explicit local approval because this development build is not signed or notarized.
 
-   ```bash
-   python3 start.py
-   ```
-
-4. The app opens at `http://127.0.0.1:8080`.
-5. Keep Terminal open while using the app. Press Control-C to stop it.
-
-You can also run:
+For source development only:
 
 ```bash
-chmod +x start.sh
-./start.sh
+CI=true pnpm install
+CI=true pnpm run electron:start
 ```
+
+The historical browser launcher (`start.py`) and hosted-storage candidate remain in the repository as migration/research material. They are not the private-beta runtime.
+
+## Local vault and migration
+
+Money Moves keeps one authoritative encrypted vault in the operating system’s per-user application-data directory, not in Supabase or browser `localStorage`. The desktop app writes `active.mmvault`, retains `previous.mmvault` as recovery evidence, and never writes plaintext financial data to its vault directory.
+
+To move data from the older browser prototype, first export its encrypted backup, then choose **Restore encrypted backup** in the desktop app. The desktop app validates and decrypts the backup locally, migrates/validates its canonical state, and asks for explicit replacement confirmation. It never imports browser `localStorage`, Vercel, or Supabase automatically.
 
 ## First launch
 
-Create a passphrase with at least 12 characters. It encrypts the local vault and is not recoverable.
+Create a passphrase with at least 12 characters. It encrypts the local vault and is not recoverable. Keep one or more encrypted `.mmvault` backups separately; each still requires the correct passphrase.
 
-This release preserves the V1 local dashboard while introducing a V2 foundation for schema migrations and domain validation. It does not contain bank credentials, access tokens, or a live bank connection.
+This release preserves the current user workflows, schema-7 migrations, IDs, buckets, allocations, reimbursement services, audit history, V1 recovery compatibility, and integer-cent accounting. It does not contain bank credentials, access tokens, cloud backup, or a live bank connection.
 
-## V2 foundation status
+## Desktop foundation status
 
-The repository now has a versioned state schema, runtime-validated foundation models, and a compatibility-preserving V1-to-V2 migration path. The existing V1 UI remains in place. Transaction import, new V2 screens, and Plaid are not part of this foundation release.
+The Electron shell, encrypted local-file repository, atomic replacement, generation conflict checks, manual encrypted backup/restore, single-instance behavior, package inspection, and unsigned macOS DMG are implemented and awaiting independent acceptance. Hosted live vault synchronization is deferred and not accepted.
 
 ## Monthly rollover
 
@@ -40,12 +39,13 @@ The app cannot fetch transactions while closed. The V2 import workflow is intent
 
 ## Security
 
-- AES-256-GCM encrypted vault
+- Renderer-only AES-256-GCM vault encryption
 - PBKDF2-SHA-256 with 600,000 iterations
 - Fresh IV for every save
 - 60-minute default inactivity lock
-- Encrypted backup export and restore
-- No analytics, external scripts, or remote fonts
+- Native encrypted backup export and explicit restore
+- Sandboxed renderer, context isolation, narrow IPC, and local application protocol
+- No remote financial persistence, analytics, external scripts, or remote fonts
 
 See `SECURITY.md` for the threat model.
 
@@ -60,4 +60,4 @@ See `SECURITY.md` for the threat model.
 
 ## Important limitation
 
-Direct bank API synchronization is not included. Implementing that safely requires a financial-data aggregator, secure token storage, pending/posted reconciliation, and connection-repair flows. Plaid is intentionally out of scope.
+Direct bank API synchronization is not included. Cloud backup, live sync, phone editing, shared vaults, reimbursement UI, Shared Expenses, refund workflows, automatic updates, signing, and notarization are intentionally out of scope for this foundation.

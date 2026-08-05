@@ -1,5 +1,4 @@
 import {parseCsv, rowsToTransactions} from './csv.js';
-import {createVaultRepository} from './services/vaultRepository.js';
 import {createStateService} from './services/stateService.js';
 import {advanceStateRevision} from './services/stateRevision.js';
 import {
@@ -16,10 +15,15 @@ import {
   monthSummary, debtAccounts,
   rankedDestinations, addVisited, scriptureForMonth, bucketById
 } from './state.js';
-import {isHostedStorageConfigured} from './services/supabaseClient.js';
-import {AuthServiceError, getCurrentSession, onAuthStateChange, signInWithProvider, signOut as authSignOut} from './services/authService.js';
-import {mustClearUnlockedVault} from './services/sessionSafety.js';
-
+const isDesktop = Boolean(globalThis.moneyMovesDesktop?.vault);
+const {createVaultRepository} = isDesktop
+  ? {createVaultRepository:(await import('./services/desktopVaultRepository.js')).createDesktopVaultRepository}
+  : await import('./services/vaultRepository.js');
+const browserRuntime = isDesktop ? null : {
+  ...(await import('./services/supabaseClient.js')),
+  ...(await import('./services/authService.js')),
+  ...(await import('./services/sessionSafety.js'))
+};
 const seed = window.MONEY_MOVES_SEED;
 const $ = id => document.getElementById(id);
 const vaultRepository = createVaultRepository();
@@ -62,7 +66,7 @@ function setMessage(id,message,isError=false) {
   const node=$(id);
   if (!node) return;
   node.textContent=message || '';
-  node.style.color=isError?'var(--red)':'var(--muted)';
+  node.classList.toggle('is-error',isError);
 }
 
 function showPanel(name) {
@@ -134,7 +138,11 @@ async function signOutApp() {
   externalVaultChangeObserved=false;
   clearTimeout(inactivityTimer);
   currentSession=null;
-  try { await authSignOut(); } catch { /* the local session is cleared below regardless */ }
+  if (isDesktop) {
+    showPanel('unlock');
+    return;
+  }
+  try { await browserRuntime.signOut(); } catch { /* the local session is cleared below regardless */ }
   showPanel('signin');
 }
 
@@ -210,10 +218,12 @@ function renderOverview() {
   const summary=monthSummary(state);
   $('safeToSpend').textContent=money(summary.safeToSpend);
   $('cashFlow').textContent=money(summary.cashFlow);
-  $('cashFlow').style.color=summary.cashFlow<0?'var(--red)':'var(--green)';
+  $('cashFlow').classList.toggle('is-negative',summary.cashFlow<0);
+  $('cashFlow').classList.toggle('is-positive',summary.cashFlow>=0);
   $('cashFlowNote').textContent=`${money(summary.income)} posted income minus ${money(summary.spend)} spending`;
   $('netWorth').textContent=money(state.providerSnapshot.netWorth);
-  $('netWorth').style.color=state.providerSnapshot.netWorth<0?'var(--red)':'var(--green)';
+  $('netWorth').classList.toggle('is-negative',state.providerSnapshot.netWorth<0);
+  $('netWorth').classList.toggle('is-positive',state.providerSnapshot.netWorth>=0);
   $('snapshotAsOf').textContent=`Snapshot through ${state.providerSnapshot.asOf}`;
   const stats=weekStats(state);
   $('reviewPercent').textContent=`${stats.completion}%`;
@@ -227,7 +237,7 @@ function renderOverview() {
     const pct=target>0?Math.min(actual/target*100,100):(actual>0?100:0);
     return `<div class="progress-row">
       <div class="name"><strong>${escapeHtml(bucket.name)}</strong><small>${escapeHtml(bucket.group)}${bucket.protected?' · protected':''}</small></div>
-      <div class="bar"><i class="${target>0&&actual>target?'over':''}" style="width:${pct}%"></i></div>
+      <div class="bar"><progress class="${target>0&&actual>target?'over':''}" max="100" value="${pct}">${pct}%</progress></div>
       <div class="amount-pair"><strong>${money(actual)}</strong><small>of ${money(target)}</small></div>
     </div>`;
   }).join('');
@@ -246,7 +256,7 @@ function renderOverview() {
     const util=priority.utilization;
     $('priorityCard').innerHTML=`<div class="priority"><strong>${escapeHtml(priority.name)}</strong>
       <span>${money(priority.balance)} balance${util!==null?` · ${util.toFixed(1)}% utilization`:''}</span>
-      ${util!==null?`<div class="util-track"><i style="width:${Math.min(util,100)}%"></i></div>`:''}
+      ${util!==null?`<div class="util-track"><progress max="100" value="${Math.min(util,100)}">${Math.min(util,100)}%</progress></div>`:''}
       <small>${priority.apr?`${priority.apr.toFixed(2)}% purchase APR · `:''}Paying this card first reduces your highest known utilization.</small></div>`;
   } else $('priorityCard').innerHTML='<p>No credit accounts in this snapshot.</p>';
 
@@ -264,14 +274,15 @@ function renderReview() {
   const stats=weekStats(state);
   $('reviewRemaining').textContent=stats.remaining;
   $('reviewProgressText').textContent=`${stats.reviewed} of ${stats.total} complete`;
-  $('reviewProgressBar').style.width=`${stats.completion}%`;
+  $('reviewProgressBar').value=stats.completion;
   const queue=reviewQueue(state);
   const tx=queue[0];
   $('transactionEmpty').classList.toggle('hidden',Boolean(tx));
   $('transactionBody').classList.toggle('hidden',!tx);
   if (tx) {
     $('transactionAmount').textContent=`${tx.flow==='inflow'?'+':''}${money(tx.amount)}`;
-    $('transactionAmount').style.color=tx.flow==='inflow'?'var(--green)':'var(--lime)';
+    $('transactionAmount').classList.toggle('is-positive',tx.flow==='inflow');
+    $('transactionAmount').classList.toggle('is-lime',tx.flow!=='inflow');
     $('transactionMerchant').textContent=tx.merchant;
     $('transactionMeta').textContent=`${tx.date} · ${tx.account} · ${humanCategory(tx.flow)}`;
     $('providerCategory').textContent=humanCategory(tx.providerCategory);
@@ -569,7 +580,11 @@ function renderTravel() {
       <button data-research="${researchUrl(item.city,item.state,'work')}">Work setup</button>
     </div>
   </article>`).join('');
-  document.querySelectorAll('[data-research]').forEach(button=>button.addEventListener('click',()=>window.open(button.dataset.research,'_blank','noopener,noreferrer')));
+  document.querySelectorAll('[data-research]').forEach(button=>button.addEventListener('click',()=>{
+    const url=button.dataset.research;
+    if (isDesktop) globalThis.moneyMovesDesktop.app.openExternal(url).catch(()=>alert('This external research link could not be opened.'));
+    else window.open(url,'_blank','noopener,noreferrer');
+  }));
   $('visitedList').innerHTML=state.travel.visited.length
     ? state.travel.visited.map(item=>`<button class="chip" data-remove-visited="${item.id}">${escapeHtml(item.city)}, ${escapeHtml(item.state)} ×</button>`).join('')
     : '<p>No visited cities added yet.</p>';
@@ -656,6 +671,21 @@ async function importSelectedFile(file) {
   }
 }
 
+async function restoreDesktopBackup({recovery = false} = {}) {
+  const raw = await vaultRepository.importEncryptedBackup();
+  if (!raw) return;
+  const passphrase=prompt('Enter the passphrase for this encrypted backup.');
+  if (!passphrase || !confirm('Replace this local encrypted vault with the selected backup?')) return;
+  try {
+    const restored=await stateService.restore(raw,passphrase,{expectedVaultGeneration:recovery ? undefined : vaultGeneration});
+    state=restored.state;activeKey=restored.key;keyMeta=restored.meta;vaultGeneration=restored.vaultGeneration;
+    hideVaultConflict();enterApp();alert('Backup restored.');
+  } catch(error) {
+    if (error?.code === 'VAULT_CONFLICT') { showVaultConflict();alert(error.message); }
+    else alert('The backup or passphrase could not be verified. The current vault was not changed.');
+  }
+}
+
 function bindEvents() {
   $('createVault').addEventListener('click',async()=>{
     const pass=$('newPass').value, confirm=$('confirmPass').value;
@@ -717,9 +747,10 @@ function bindEvents() {
   });
   $('unlockPass').addEventListener('keydown',event=>{if(event.key==='Enter')$('unlockVault').click();});
   $('signInGoogle').addEventListener('click',async()=>{
+    if (isDesktop) return;
     setMessage('lockMessage','');
-    try { await signInWithProvider('google'); }
-    catch(error) { setMessage('lockMessage',error instanceof AuthServiceError?error.message:'Could not start Google sign-in.',true); }
+    try { await browserRuntime.signInWithProvider('google'); }
+    catch(error) { setMessage('lockMessage',error instanceof browserRuntime.AuthServiceError?error.message:'Could not start Google sign-in.',true); }
   });
   $('signOutNow').addEventListener('click',()=>{signOutApp();});
   document.querySelectorAll('.nav-item').forEach(button=>button.addEventListener('click',()=>selectScreen(button.dataset.screen)));
@@ -784,6 +815,11 @@ function bindEvents() {
   });
   $('exportBackup').addEventListener('click',async()=>{
     try {
+      if (isDesktop) {
+        const result = await stateService.exportEncryptedBackup();
+        if (!result?.cancelled) alert('Encrypted backup exported. Keep it with its passphrase.');
+        return;
+      }
       const blob=new Blob([await stateService.exportEncryptedBackup()],{type:'application/json'});
       const link=document.createElement('a');
       link.href=URL.createObjectURL(blob);
@@ -791,7 +827,13 @@ function bindEvents() {
       link.click();URL.revokeObjectURL(link.href);
     } catch(error){alert(error.message);}
   });
-  $('restoreBackup').addEventListener('click',()=>$('restoreFile').click());
+  $('restoreBackup').addEventListener('click',async()=>{
+    if (!isDesktop) return $('restoreFile').click();
+    await restoreDesktopBackup();
+  });
+  $('restoreRecoveryBackup').addEventListener('click',async()=>{
+    if (isDesktop) await restoreDesktopBackup({recovery:true});
+  });
   $('restoreFile').addEventListener('change',async()=>{
     const file=$('restoreFile').files[0];$('restoreFile').value='';
     if (!file) return;
@@ -809,6 +851,10 @@ function bindEvents() {
     }
   });
   $('resetVault').addEventListener('click',async()=>{
+    if (isDesktop) {
+      if (confirm('Lock Money Moves now? Your encrypted local vault will remain on this Mac.')) lockApp();
+      return;
+    }
     // Your encrypted vault lives in hosted storage now, not this browser, so there is
     // nothing local to erase. This signs out of the Google account on this device only
     // -- it does not delete or touch the hosted vault itself. Deleting the hosted vault
@@ -844,7 +890,7 @@ function bindEvents() {
 // vault is already unlocked in this tab so a routine token refresh doesn't reset the
 // screen out from under an active session.
 async function routeAfterAuthChange(session) {
-  if (state && mustClearUnlockedVault(currentSession, session)) {
+  if (state && browserRuntime.mustClearUnlockedVault(currentSession, session)) {
     if (allocationDraft) closeAllocationEditor();
     activeKey=null; keyMeta=null; vaultGeneration=null; state=null;
     externalVaultChangeObserved=false;
@@ -872,10 +918,25 @@ async function routeAfterAuthChange(session) {
 
 async function boot() {
   bindEvents();
-  if (!isHostedStorageConfigured()) { showPanel('not-configured'); return; }
-  unsubscribeAuthChange = onAuthStateChange(session => { routeAfterAuthChange(session).catch(()=>{}); });
+  if (isDesktop) {
+    $('signOutNow').classList.add('hidden');
+    $('notConfiguredPanel').classList.add('hidden');
+    try {
+      const has = await stateService.hasVault();
+      updateLocalRecoveryDisclosure(stateService.localRecoveryStatus());
+      showPanel(has ? 'unlock' : 'setup');
+    } catch (error) {
+      setMessage('lockMessage', error?.code === 'VAULT_CORRUPT'
+        ? 'The local encrypted vault needs recovery. Use a saved .mmvault backup in the browser prototype migration flow.'
+        : 'Money Moves could not inspect the local encrypted vault.', true);
+      showPanel('not-configured');
+    }
+    return;
+  }
+  if (!browserRuntime.isHostedStorageConfigured()) { showPanel('not-configured'); return; }
+  unsubscribeAuthChange = browserRuntime.onAuthStateChange(session => { routeAfterAuthChange(session).catch(()=>{}); });
   let session = null;
-  try { session = await getCurrentSession(); }
+  try { session = await browserRuntime.getCurrentSession(); }
   catch { showPanel('signin'); return; }
   await routeAfterAuthChange(session);
 }

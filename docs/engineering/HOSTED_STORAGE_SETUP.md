@@ -1,5 +1,7 @@
 # Hosted Storage Setup
 
+> **Historical candidate — deferred / not accepted.** The desktop-first private beta uses an authoritative local encrypted vault. Do not configure Supabase, Vercel, OAuth, or hosted live synchronization for the desktop runtime. This document is retained as hosted-storage research only.
+
 This phase moves the encrypted vault's storage address from `localStorage` to a
 Postgres row hosted by Supabase, served via Vercel. The encryption boundary in
 `js/vault.js` did not change — see the implementation report for what did.

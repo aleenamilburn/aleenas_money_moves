@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.supabase.co; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'">
   <title>Money Moves</title>
   <link rel="stylesheet" href="app.css">
 </head>
@@ -14,8 +14,9 @@
       <div class="lock-mark">MM</div>
       <section id="notConfiguredPanel" class="lock-panel hidden">
         <p class="eyebrow">SETUP NEEDED</p>
-        <h1>Hosted storage is not configured</h1>
-        <p>This deployment is missing its Supabase configuration. See <code>docs/engineering/HOSTED_STORAGE_SETUP.md</code> for the setup steps.</p>
+        <h1>Vault recovery needed</h1>
+        <p>Money Moves could not safely open the local encrypted vault. Keep the vault files unchanged and use a known encrypted backup.</p>
+        <button class="primary wide-button" id="restoreRecoveryBackup">Restore encrypted backup</button>
       </section>
       <section id="signinPanel" class="lock-panel hidden">
         <p class="eyebrow">SIGN IN</p>
@@ -25,8 +26,8 @@
       </section>
       <section id="setupPanel" class="lock-panel hidden">
         <p class="eyebrow">FIRST LAUNCH</p>
-        <h1>Create your encrypted money vault</h1>
-        <p>Your passphrase protects budgets, transactions, rules, goals, and travel history. It cannot be recovered.</p>
+        <h1>Create your encrypted local vault</h1>
+        <p>Your passphrase protects budgets, transactions, rules, goals, and travel history on this Mac. It cannot be recovered.</p>
         <p id="localRecoveryDisclosure" class="fine-print hidden"></p>
         <label>Passphrase<input id="newPass" type="password" minlength="12" autocomplete="new-password" placeholder="At least 12 characters"></label>
         <label>Confirm passphrase<input id="confirmPass" type="password" minlength="12" autocomplete="new-password"></label>
@@ -67,7 +68,7 @@
       </nav>
       <div class="sidebar-note">
         <span class="status-dot"></span>
-        <div><strong>Encrypted vault</strong><small>No automatic bank access in this app</small></div>
+        <div><strong>Encrypted local vault</strong><small>No automatic bank access in this app</small></div>
       </div>
     </aside>
 
@@ -144,7 +145,7 @@
         </div>
         <div class="review-layout">
           <article class="panel transaction-card" id="transactionCard">
-            <div class="review-progress"><span id="reviewProgressText">0 of 0 complete</span><div class="bar"><i id="reviewProgressBar"></i></div></div>
+            <div class="review-progress"><span id="reviewProgressText">0 of 0 complete</span><div class="bar"><progress id="reviewProgressBar" max="100" value="0">0%</progress></div></div>
             <div id="transactionEmpty" class="empty-state hidden">
               <div class="celebrate">✓</div><h2>Week complete</h2><p>Every transaction in this week has a bucket.</p>
             </div>
@@ -245,22 +246,22 @@
           <article class="panel">
             <p class="eyebrow">DATA INPUT</p><h2>How information gets into Money Moves</h2>
             <ol class="steps">
-              <li><strong>Current seed:</strong> this build includes a snapshot from your connected Finances accounts through July 28, 2026.</li>
-              <li><strong>Current local workflow:</strong> this legacy UI can select a local CSV file; the V2 import workflow is not part of this foundation release.</li>
-              <li><strong>Not included:</strong> direct bank APIs or background synchronization. Those require a separate aggregator integration and secure token service.</li>
+              <li><strong>Current local workflow:</strong> select a local CSV file to import. The V2 import workflow is not part of this foundation release.</li>
+              <li><strong>Vault authority:</strong> this Mac’s encrypted vault file is the live source of truth. Manual encrypted backup is available from this screen.</li>
+              <li><strong>Not included:</strong> direct bank APIs, background synchronization, or cloud backup. Those require separate approved phases.</li>
             </ol>
             <button class="primary" id="settingsImport">Import CSV</button>
           </article>
           <article class="panel">
             <p class="eyebrow">VAULT SECURITY</p><h2>Encrypted vault</h2>
-            <p>AES-256-GCM encryption, PBKDF2-SHA-256 key derivation, and a 60-minute inactivity lock. Your passphrase is never stored anywhere, on this device or off it — only you can decrypt your data.</p>
+            <p>AES-256-GCM encryption, PBKDF2-SHA-256 key derivation, and a 60-minute inactivity lock. Your passphrase is never stored. Only you can decrypt your local vault and encrypted backups.</p>
             <p class="fine-print" id="signedInAs"></p>
             <div class="button-stack">
               <button id="changePassphrase">Change passphrase</button>
               <button id="exportBackup">Export encrypted backup</button>
               <button id="restoreBackup">Restore encrypted backup</button>
-              <input class="file-input" type="file" id="restoreFile" accept=".json,application/json">
-              <button class="danger" id="resetVault">Sign out of this browser</button>
+              <input class="file-input" type="file" id="restoreFile" accept=".mmvault,.json,application/json">
+              <button class="danger" id="resetVault">Lock this app</button>
             </div>
           </article>
         </div>
@@ -304,7 +305,6 @@
   </div>
 
   <script src="data.js"></script>
-  <script src="js/config.js"></script>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

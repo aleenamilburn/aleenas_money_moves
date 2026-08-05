@@ -2,72 +2,40 @@
 
 ## Current repository state
 
-- Repository: /Users/aleenamilburn/Downloads/aleenas_money_moves
-- Branch: main
-- Committed HEAD: 8a6db51569356312302a0babfdcff1c6456a43b6 (claudes changes)
-- Remote: origin/main matched HEAD before the hosted hardening working tree began.
-- Historical accepted checkpoint: 4c0eb5b (local cross-tab coordination).
-- Current domain schema: 7.
-- Git tags: none.
-- Current worktree contains the hosted-storage hardening candidate and is intentionally uncommitted. Do not reset, clean, or discard it.
+- Repository: `/Users/aleenamilburn/Downloads/aleenas_money_moves`
+- Branch: `main`
+- Hosted correction preservation checkpoint: `c591368` (`Harden hosted storage correction candidate`)
+- Desktop foundation candidate: `v2-desktop-foundation-candidate` (`Implement desktop-first Electron foundation`)
+- Current domain schema: 7
+- Desktop package version: `2.0.0-desktop.0`
+- Founder direction: macOS-first Electron desktop app with one authoritative encrypted local vault per owner.
 
-## Product decision
+## Desktop foundation
 
-Money Moves supports one encrypted canonical financial vault accessible from the owner's MacBook and phone. Supabase hosts one opaque encrypted vault row per authenticated user; Google OAuth provides account access; browser-side AES-GCM/PBKDF2 remains the decryption boundary; Vercel is static hosting. Plaid remains deferred.
+The desktop implementation is **IMPLEMENTED / AWAITING ACCEPTANCE**. Read `DESKTOP_FIRST_ARCHITECTURE_DECISION.md` and `V2_DESKTOP_FOUNDATION_IMPLEMENTATION.md` first.
 
-Hosted storage is an approved direction, not an accepted capability. The latest independent review decision is **NOT ACCEPTED** in V2A_HOSTED_STORAGE_ACCEPTANCE.md.
+- `electron/main.js` owns lifecycle, single-instance behavior, a local application protocol, native dialogs, narrow IPC dispatch, and encrypted files.
+- `electron/preload.js` exposes a frozen `moneyMovesDesktop` API only; no generic IPC, Node, filesystem, process, or Electron internals reach the renderer.
+- `js/services/desktopVaultRepository.js` keeps encryption/decryption, schema migration, domain validation, and unlocked state in the renderer.
+- `electron/localVaultRepository.js` stores only encrypted envelopes in `active.mmvault`, `previous.mmvault`, and `pending.mmvault`, with read-back verification, previous preservation, atomic promotion, permissions, and generation conflicts.
+- Electron 43.3.0 / Forge 7.11.2 produce an unsigned ARM64 macOS app, DMG, and ZIP. `inspect:package` scans filesystem/ASAR content and the empty seed.
 
-## What is implemented in the current candidate
+## Product boundaries
 
-- RLS-owned hosted vault adapter with conditional generation writes.
-- Client-side encryption, encrypted backup/restore, passphrase change, and generic errors.
-- Authenticated generation plus monotonic sequence in AES-GCM AAD.
-- SQL migration 0002 for envelope/generation coherence, sequence progression, and explicit browser-role privileges.
-- Per-device non-financial rollback checkpoint.
-- Account-switch clearing of decrypted state.
-- Explicit V1 encrypted-vault adoption and recovery download; no automatic overwrite or merge.
-- Sanitized OAuth/session errors.
-- Hosted fake RLS tests and a hosted synthetic browser harness.
-- The retired Phase 3C lease fixture now points users to the hosted harness.
-- Public data.js is now an empty migration-valid baseline; it no longer ships populated finance records before authentication.
+The local vault is live authority. Backup/export is manual and encrypted. Restore is explicit and conflict-protected. Existing browser users migrate only by exporting an encrypted backup and restoring it in Electron; there is no automatic localStorage/Vercel/Supabase migration or merge.
 
-## What is not accepted or verified
+Hosted live vault sync is **DEFERRED / NOT ACCEPTED**. The historical Supabase code, migrations, reports, and setup guide are retained as research but are not in the Electron runtime. Encrypted cloud backup, Plaid, phone editing, multi-device editing, shared vaults, reimbursement UI, Shared Expenses, refunds, reporting redesign, automatic updates, signing, and notarization are not implemented.
 
-- The deployed Supabase project has not been proven to contain migration 0002.
-- Live RLS policy/grant behavior has not been attacked with two synthetic users.
-- OAuth creation, refresh, expiration, sign-out, and account switching have not been tested against Google/Supabase.
-- The hardened candidate has not been deployed to Vercel.
-- Real PostgREST CAS, ambiguous network responses, backup/restore, and independent browser-profile/device contention are unverified.
-- A device with a prior local checkpoint detects a replay to an older sequence, but a fresh device cannot independently detect a malicious Supabase administrator replaying a complete old ciphertext row.
+## Validation evidence
 
-## Required next action
+- `CI=true pnpm run check`: passed.
+- `CI=true pnpm run electron:test`: 8 passed, 0 failed.
+- `CI=true pnpm test`: 148 passed, 0 failed.
+- `CI=true pnpm run electron:package`: ARM64 macOS package passed.
+- `CI=true pnpm run electron:make`: unsigned ARM64 DMG and ZIP passed.
+- `CI=true pnpm run inspect:package`: passed (286 filesystem files and 66 ASAR entries scanned).
+- Short isolated Forge development and packaged-app launch smoke checks completed with no console output after the custom-protocol fix. They are not an acceptance report.
 
-Do not begin V2B ingestion, Plaid, reimbursement UI, Shared Expenses, refunds, or reporting.
+## Recommended next task
 
-1. Preserve an encrypted backup.
-2. Apply migrations 0001 and 0002 to an isolated Supabase test project.
-3. Deploy this exact hardening candidate to a non-production Vercel deployment with an untracked config.js containing only the HTTPS Supabase base URL and anon/publishable key.
-4. Use two synthetic Google/Supabase test identities to run the real acceptance matrix: cross-user RLS, forged owner, anonymous denial, Plaid denial, CAS race, timeout reconciliation, session lifecycle, local adoption, backup/restore, and two-profile/device behavior.
-5. Decide whether Supabase administrators are trusted for ciphertext integrity/availability. If not, sponsor an independent anti-rollback anchor before claiming rollback protection.
-6. Update the acceptance report with exact real evidence. Mark hosted storage accepted only if all blocking issues are resolved.
-
-## Product and security invariants
-
-- Do not transmit financial plaintext, passphrases, raw keys, or service-role keys.
-- Keep RLS enabled on every user-data table.
-- Keep plaid_secrets default-deny to browser roles.
-- Do not auto-merge or auto-overwrite local and hosted vaults.
-- Do not add hosted-vault deletion as a side effect of another phase.
-- Preserve V1 local records and canonical IDs, allocations, reimbursements, audits, and stateRevision.
-- Treat the hosted row as authoritative; offline edits must fail or be explicitly designed, never last-writer-wins.
-
-## Validation baseline for the hardening candidate
-
-- pnpm test: 140 passed, 0 failed.
-- pnpm run check: passed.
-- Python compilation with isolated cache: passed.
-- Unstaged and staged git diff checks: passed.
-- Local hosted-fake browser harness: primary save, stale conflict, opaque row shape, and clean console passed.
-- Deployed HTTPS sign-in page: loaded with no console warnings/errors only. No real authenticated test was performed.
-
-Read V2A_HOSTED_STORAGE_IMPLEMENTATION.md, V2A_HOSTED_STORAGE_ACCEPTANCE.md, HOSTED_STORAGE_SETUP.md, and AGENTS.md before continuing.
+Perform an independent desktop acceptance review with synthetic data: create/unlock/save/relaunch; allocation edit/relaunch; backup/restore; second-instance focus; stale generation; interrupted/pending/previous recovery states; dialog cancellation; invalid/oversize backup; console capture; and a clean-machine DMG install. Decide Apple signing/notarization readiness separately. Do not begin cloud backup or Plaid before this acceptance review.

@@ -1,0 +1,46 @@
+import {FusesPlugin} from '@electron-forge/plugin-fuses';
+import {FuseV1Options, FuseVersion} from '@electron/fuses';
+
+export default {
+  packagerConfig:{
+    asar:true,
+    appBundleId:'com.moneymoves.desktop',
+    name:'Money Moves',
+    executable:'Money Moves',
+    ignore:[
+      /^\/test($|\/)/,
+      /^\/docs($|\/)/,
+      /^\/supabase($|\/)/,
+      /^\/\.git($|\/)/,
+      /^\/\.agents($|\/)/,
+      /^\/\.codex($|\/)/,
+      /^\/\.claude($|\/)/,
+      /^\/\.pnpm-store($|\/)/,
+      /^\/__pycache__($|\/)/,
+      /^\/\.DS_Store$/,
+      /^\/out($|\/)/,
+      /^\/node_modules\/\.cache($|\/)/,
+      /^\/sample-transactions\.csv$/,
+      /^\/start\.(py|sh|command|bat)$/,
+      /^\/js\/config(\.example)?\.js$/,
+      /^\/js\/vendor\/supabase-js($|\/)/,
+      /\.map$/
+    ]
+  },
+  makers:[
+    {name:'@electron-forge/maker-dmg', config:{format:'ULFO'}},
+    {name:'@electron-forge/maker-zip', platforms:['darwin']}
+  ],
+  plugins:[
+    new FusesPlugin({
+      version:FuseVersion.V1,
+      [FuseV1Options.RunAsNode]:false,
+      [FuseV1Options.EnableCookieEncryption]:true,
+      [FuseV1Options.EnableNodeOptionsEnvironmentVariable]:false,
+      [FuseV1Options.EnableNodeCliInspectArguments]:false,
+      [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]:true,
+      [FuseV1Options.OnlyLoadAppFromAsar]:true,
+      [FuseV1Options.GrantFileProtocolExtraPrivileges]:false
+    })
+  ]
+};
