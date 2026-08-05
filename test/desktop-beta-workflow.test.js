@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import {STARTER_SPENDING_BUCKETS, SYSTEM_BUCKET_IDS} from '../js/domain/constants.js';
 import {migrateState} from '../js/domain/migrations.js';
+import {createUnknownAccount, validateBucket} from '../js/domain/models.js';
 import {deleteBucket, createBucket, updateBucket} from '../js/services/bucketService.js';
 import {saveAllocationDraft, validateAllocationDraft} from '../js/services/allocationService.js';
 import {reviewAssignmentTarget, reviewChildrenForParent, reviewParentBuckets} from '../js/services/reviewAssignment.js';
@@ -52,6 +53,37 @@ test('schema 8 creates ordinary starter buckets only for an originally empty vau
   assert.equal(migrated.domain.buckets.some(bucket => bucket.id === 'mm-starter-housing'), false);
   assert.equal(migrated.domain.buckets.find(bucket => bucket.id === 'user-income').semanticType, 'spending');
   assert.equal(migrated.domain.buckets.filter(bucket => bucket.system).length, 3);
+});
+
+test('schema 8 recognizes only the structural unknown account as fresh evidence and preserves all other V1 content', () => {
+  const initialized = emptySchema7();
+  initialized.domain.accounts.push(createUnknownAccount(now));
+  const migrated = migrateState(initialized, {now}).state;
+  assert.deepEqual(migrated.domain.buckets.filter(bucket => !bucket.system).map(bucket => bucket.id), STARTER_SPENDING_BUCKETS.map(bucket => bucket.id));
+  assert.deepEqual(migrateState(migrated, {now}).state, migrated, 'migration is idempotent after starters are present');
+
+  const legacyContent = emptySchema7();
+  legacyContent.debts = [{id:'debt-1', name:'Preserve me'}];
+  const preserved = migrateState(legacyContent, {now}).state;
+  assert.equal(preserved.domain.buckets.some(bucket => bucket.id === 'mm-starter-housing'), false);
+  assert.deepEqual(preserved.debts, legacyContent.debts);
+});
+
+test('schema 8 rejects partial classifications and turns schema 7 forward fields into ordinary user buckets', () => {
+  const partial = {
+    id:'user-income', parentId:null, name:'Income', group:'User choice', order:0, targetCents:0,
+    protected:false, semanticType:'income', system:false, active:true, description:null, archivedAt:null, createdAt:now, updatedAt:now
+  };
+  const legacy = emptySchema7();
+  legacy.domain.buckets.push(partial);
+  const migrated = migrateState(legacy, {now}).state;
+  assert.equal(migrated.domain.buckets.find(bucket => bucket.id === partial.id).semanticType, 'spending');
+  assert.equal(validateBucket({...migrated.domain.buckets.find(bucket => bucket.id === SYSTEM_BUCKET_IDS.income), system:false}).ok, false);
+  assert.equal(validateBucket({...partial, schemaVersion:8}).ok, false);
+
+  const collision = emptySchema7();
+  collision.domain.buckets.push({...partial, id:SYSTEM_BUCKET_IDS.income, semanticType:undefined});
+  assert.throws(() => migrateState(collision, {now}), /reserved system bucket id/);
 });
 
 test('system classifications are protected, while starter buckets remain ordinary editable buckets', () => {
@@ -134,4 +166,5 @@ test('Weekly Review separates the split editor action from parent-first bucket c
   assert.match(styles, /@media\(max-width:760px\)\{\.app-shell\{grid-template-columns:minmax\(0,1fr\)\}/);
   assert.match(styles, /@media\(max-width:760px\).*\.review-secondary-actions #editCurrentAllocation\{width:100%;min-width:0\}/);
   assert.match(renderer, /\$\('editCurrentAllocation'\)\.onclick=\(\)=>openAllocationEditor\(tx\.id,'review'\)/);
+  assert.match(renderer, /transactionAllocationSummary\(state,tx\.id\)\.status === 'split'[\s\S]*?openAllocationEditor\(tx\.id,'review'\)/);
 });

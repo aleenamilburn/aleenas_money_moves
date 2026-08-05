@@ -1,4 +1,4 @@
-import {BUCKET_SEMANTIC_TYPES, DEFAULT_CURRENCY, UNKNOWN_ACCOUNT_ID} from './constants.js';
+import {BUCKET_SEMANTIC_TYPES, DEFAULT_CURRENCY, SYSTEM_BUCKET_IDS, UNKNOWN_ACCOUNT_ID} from './constants.js';
 
 export const ACCOUNT_TYPES = new Set(['cash', 'credit', 'loan', 'savings', 'investment', 'unknown']);
 export const TRANSACTION_SOURCES = new Set(['manual', 'csv', 'migration']);
@@ -16,6 +16,12 @@ export const PAYMENT_LINK_SOURCES = new Set(['user_linked', 'suggestion_confirme
 export const REIMBURSEMENT_ADJUSTMENT_TYPES = new Set(['write_off', 'write_off_reversal']);
 export const AUDIT_EVENT_SOURCES = new Set(['user', 'migration', 'reconciliation']);
 export const REIMBURSEMENT_STATUSES = new Set(['cancelled', 'open', 'partially_paid', 'settled', 'written_off']);
+
+const SYSTEM_BUCKET_SEMANTICS = Object.freeze({
+  [SYSTEM_BUCKET_IDS.income]:'income',
+  [SYSTEM_BUCKET_IDS.transfer]:'transfer',
+  [SYSTEM_BUCKET_IDS.debtPayment]:'debt_payment'
+});
 
 export class ModelValidationError extends Error {
   constructor(modelName, errors) {
@@ -194,6 +200,16 @@ export function validateBucket(value, {legacySemanticType = false} = {}) {
   if (!legacySemanticType) {
     requiredEnum(value.semanticType, 'semanticType', BUCKET_SEMANTIC_TYPES, errors);
     requiredBoolean(value.system, 'system', errors);
+    const expectedSemanticType = SYSTEM_BUCKET_SEMANTICS[value.id] || null;
+    if (expectedSemanticType) {
+      if (value.system !== true) errors.push(`reserved system bucket ${value.id} must be a system classification`);
+      if (value.protected !== true) errors.push(`reserved system bucket ${value.id} must be protected`);
+      if (value.parentId !== null) errors.push(`reserved system bucket ${value.id} must be top-level`);
+      if (value.semanticType !== expectedSemanticType) errors.push(`reserved system bucket ${value.id} must use ${expectedSemanticType} semantics`);
+    } else {
+      if (value.system === true) errors.push('only reserved bucket IDs may be system classifications');
+      if (value.semanticType !== 'spending') errors.push('user-owned buckets must use spending semantics');
+    }
   }
   optionalString(value.description, 'description', errors);
   optionalDate(value.archivedAt, 'archivedAt', errors);

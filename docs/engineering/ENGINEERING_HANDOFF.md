@@ -27,9 +27,12 @@ The local vault is live authority. Backup/export is manual and encrypted. Restor
 
 Hosted live vault sync is **DEFERRED / NOT ACCEPTED**. The historical Supabase code, migrations, reports, and setup guide are retained as research but are not in the Electron runtime. Encrypted cloud backup, Plaid, phone editing, multi-device editing, shared vaults, reimbursement UI, Shared Expenses, refunds, reporting redesign, automatic updates, signing, and notarization are not implemented.
 
-## Current V2B workflow-correction candidate
+## Accepted V2B desktop-beta workflows
 
-Read `V2B_DESKTOP_BETA_WORKFLOW_CORRECTIONS.md` before changing bucket, allocation, Overview, or month behavior. This unaccepted candidate moves the domain to schema 8.
+Read `V2B_DESKTOP_BETA_WORKFLOW_ACCEPTANCE.md` and
+`V2B_DESKTOP_BETA_WORKFLOW_CORRECTIONS.md` before changing bucket, allocation,
+Overview, or month behavior. The independently accepted correction moves the
+domain to schema 8.
 
 - Schema 8 seeds editable Housing, Food, and Transportation only for a genuinely empty original vault; restored, migrated, and otherwise non-empty vaults receive no starters.
 - Income (`mm-system-income`), Money Transfer (`mm-system-money-transfer`), and Debt Payment (`mm-system-debt-payment`) are protected system classifications with explicit semantics. Existing buckets are never converted because of their names.
@@ -37,12 +40,14 @@ Read `V2B_DESKTOP_BETA_WORKFLOW_CORRECTIONS.md` before changing bucket, allocati
 - Overview now derives parent totals from canonical allocations, rolling direct and immediate-child amounts together once. Income and transfers are excluded from ordinary spending, while debt payments remain distinct.
 - UI month defaults use the Mac’s local clock rather than the deterministic migration fallback timestamp. A user’s valid selected historical month persists.
 
-`CI=true pnpm test` passed with 173 tests after the final correction. The
-founder A–F functional matrix is recorded PASS, and direct/DMG packaged
-synthetic checks confirm the Weekly Review Split/Allocation action is separated
-from bucket choices, opens/cancels correctly, and does not overlap at a 720px
-viewport. This is a candidate record, not independent acceptance; do not call
-V2B accepted or distribute it as an accepted beta correction.
+Independent acceptance found and corrected normal-empty-vault starter seeding,
+legacy-content starter pollution, partial classification records, reserved-ID
+collisions, and a review path that could collapse a pre-existing split. It then
+passed `CI=true pnpm test` with **175 tests**, `CI=true pnpm run electron:test`
+with **27 tests**, check/compile/diff validation, package/make, and package
+inspection (287 filesystem files and 42 ASAR entries). The direct ARM64 bundle
+and read-only mounted DMG were verified; the recorded founder A–F synthetic
+matrix remains PASS.
 
 ## Validation evidence
 
@@ -56,7 +61,9 @@ V2B accepted or distribute it as an accepted beta correction.
 
 ## Recommended next task
 
-Perform the independent V2B acceptance review against this candidate, including
-an independent native-dialog/back-up restore observation and any unobserved
-Finder/Dock/application-switcher icon cache behavior. Do not begin cloud backup
-or Plaid before separately approved phases.
+Perform the final beta-Mac native export → import → restore click-through and
+Finder/Dock/application-switcher icon-cache observation, then scope a Developer
+ID signing/notarization release-readiness task. From the V2B workflow gate, a
+separately approved Faith & Money devotional phase may be planned. Do not begin
+Plaid, cloud backup, hosted sync, phone support, shared vaults, or travel work
+without separately approved phases.

@@ -305,6 +305,12 @@ function renderReview() {
     $('reviewBucketChoices').innerHTML=buckets.map(bucket=>`<button class="bucket-choice ${bucket.id===suggested?'suggested':''}" data-bucket="${bucket.id}">
       <span>${escapeHtml(bucketPath(bucket.id))}</span><small>${escapeHtml(bucket.group)}</small></button>`).join('');
     $('reviewBucketChoices').querySelectorAll('.bucket-choice').forEach(button=>button.addEventListener('click',async()=>{
+      if (transactionAllocationSummary(state,tx.id).status === 'split') {
+        // A parent-first choice is a one-allocation operation. Never collapse
+        // an existing split while attempting to review it.
+        openAllocationEditor(tx.id,'review');
+        return;
+      }
       const target=reviewAssignmentTarget(state,button.dataset.bucket);
       if (!target.parent) return;
       if (target.children.length) {

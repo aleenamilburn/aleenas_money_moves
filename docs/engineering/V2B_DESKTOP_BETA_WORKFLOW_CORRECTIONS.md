@@ -1,6 +1,6 @@
 # Money Moves V2B — Desktop Beta Workflow Corrections
 
-Status: CANDIDATE READY / INDEPENDENT ACCEPTANCE PENDING
+Status: ACCEPTED WITH LOW-RISK FOLLOW-UPS — see `V2B_DESKTOP_BETA_WORKFLOW_ACCEPTANCE.md`
 Date: 2026-08-05
 Scope: desktop private-beta workflow correction only
 
@@ -26,9 +26,10 @@ They are added by ID, never by matching a user-visible name. An existing user bu
 
 The three editable starter spending buckets—Housing, Food, and Transportation—are seeded only when the **original input before any migration step** has no user-data evidence:
 
-- no records in any domain collection (accounts, transactions, buckets, allocations, reimbursement records, rules, audit records, or preserved snapshots);
+- no domain records other than the structural `unknown-account` placeholder (and no transactions, buckets, allocations, reimbursement records, rules, audit records, or preserved snapshots);
 - no legacy review transactions, buckets, or merchant rules;
 - no V1 categories or preserved V1 categories/review buckets.
+- no V1 debts, goals, travel history/destinations, scripture data, monthly history, or populated provider snapshot.
 
 Any one of those records prevents starter seeding. This avoids inserting starter buckets into a previously used, restored, migrated, or otherwise non-empty vault. Re-running the migration or relaunching a schema-8 vault adds no duplicates. The protected system classifications are deliberately separate: they are added once to older vaults too so financial semantics are explicit without name-based conversion.
 
@@ -44,7 +45,8 @@ Any one of those records prevents starter seeding. This avoids inserting starter
 
 `test/desktop-beta-workflow.test.js` covers:
 
-- fresh-only starter seeding, idempotence, no duplicate systems, and no name-based conversion;
+- fresh-only starter seeding including an initialized unknown account, idempotence, no duplicate systems, and no name-based conversion;
+- no starter pollution of a V1 vault with other user content; partial schema-7 forward classifications normalize to ordinary buckets; malformed schema-8 classifications and reserved-ID collisions fail safely;
 - protection of system classifications and editability of ordinary starters;
 - parent-only review choices with explicit child-target behavior and no chooser side effect;
 - direct-plus-child parent rollup, income/transfer/debt behavior, exact split restriction, and signed canonical classifications;
@@ -52,7 +54,7 @@ Any one of those records prevents starter seeding. This avoids inserting starter
 
 Existing V1 compatibility, bucket, allocation, reimbursement, hosted-storage research, desktop-vault, and Electron security tests remain part of the full suite.
 
-## Acceptance still required
+## Acceptance outcome
 
 Before this phase is accepted, run the documented desktop manual matrix against a newly packaged application:
 
@@ -63,7 +65,9 @@ Before this phase is accepted, run the documented desktop manual matrix against 
 5. Classify synthetic income, transfer, and debt-payment records; verify their separate treatment in Overview after lock/unlock.
 6. Confirm a fresh vault opens to the local current month, no January 1970 option appears merely from migration, and an explicit valid prior month remains selected after restart.
 
-No acceptance decision, release tag, or distribution claim is made by this implementation record.
+The independent reviewer accepted the corrected workflow with only low-risk
+release follow-ups. The full findings, evidence boundaries, and final commit/tag
+are recorded in `V2B_DESKTOP_BETA_WORKFLOW_ACCEPTANCE.md`.
 
 ## Founder packaged manual matrix — 2026-08-05 finalization run
 
@@ -84,7 +88,9 @@ the engineering run. Do not mark a row passed from automated coverage alone.
 
 ### Artifact and icon observations already verified
 
-- `CI=true pnpm test`: **173 passed**, 0 failed; `CI=true pnpm run electron:test`:
+- Candidate evidence recorded `CI=true pnpm test`: **173 passed**, 0 failed. The
+  corrected independent-acceptance run passed **175 tests**, 0 failed;
+  `CI=true pnpm run electron:test`:
   **27 passed**, 0 failed; `CI=true pnpm run check`, Python compilation, and
   staged/unstaged `git diff --check` passed.
 - Fresh unsigned ARM64 direct app, DMG, and ZIP were made under `out/`.
@@ -134,8 +140,7 @@ re-observed in this final spacing run.
 
 ### Acceptance boundary
 
-The V2B candidate is ready for its bounded candidate commit and candidate tag,
-but remains **INDEPENDENT ACCEPTANCE PENDING**. This founder matrix and package
-evidence do not constitute independent acceptance. Signing/notarization,
-Plaid, cloud backup, live sync, phone support, shared-vault work, and unrelated
-product scope remain out of this candidate.
+The acceptance applies only to the schema-8 desktop-beta workflow correction.
+Signing/notarization remains a separate release-readiness phase; Plaid, cloud
+backup, live sync, phone support, shared-vault work, and unrelated product scope
+remain out of this release.

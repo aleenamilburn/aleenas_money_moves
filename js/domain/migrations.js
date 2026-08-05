@@ -1,4 +1,4 @@
-import {BUCKET_SEMANTIC_TYPES, PRODUCT_NAME, STARTER_SPENDING_BUCKETS, STATE_SCHEMA_VERSION, SYSTEM_BUCKET_IDS} from './constants.js';
+import {PRODUCT_NAME, STARTER_SPENDING_BUCKETS, STATE_SCHEMA_VERSION, SYSTEM_BUCKET_IDS, UNKNOWN_ACCOUNT_ID} from './constants.js';
 import {createUnknownAccount, validateAuditEvent, validateDomainStore, validateBucket} from './models.js';
 import {canonicalTransactionFromLegacy, deterministicAllocationId} from '../services/allocationService.js';
 import {initializeStateRevision} from '../services/stateRevision.js';
@@ -238,17 +238,29 @@ function initializeDomainStore(state, {now}) {
 function hasFreshVaultEvidence(state) {
   const domain = asObject(state.domain);
   const domainCollections = [
-    'accounts', 'transactions', 'buckets', 'allocations', 'reimbursementClaims',
+    'transactions', 'buckets', 'allocations', 'reimbursementClaims',
     'reimbursementClaimAllocations', 'reimbursementPaymentLinks', 'reimbursementAdjustments',
     'merchantRules', 'auditEvents', 'legacyMonthlySnapshots', 'legacyBalanceSnapshots'
   ];
   if (domainCollections.some(field => Array.isArray(domain[field]) && domain[field].length > 0)) return false;
+  // Schema 3+ always materializes this structural placeholder. It does not mean
+  // the user has started using the vault, but every other account does.
+  if (Array.isArray(domain.accounts) && domain.accounts.some(account => account?.id !== UNKNOWN_ACCOUNT_ID)) return false;
   if (Array.isArray(state.review?.transactions) && state.review.transactions.length > 0) return false;
   if (Array.isArray(state.review?.buckets) && state.review.buckets.length > 0) return false;
   if (Array.isArray(state.review?.merchantRules) && state.review.merchantRules.length > 0) return false;
   if (Array.isArray(state.categories) && state.categories.length > 0) return false;
   if (Array.isArray(state.legacyV1?.categories) && state.legacyV1.categories.length > 0) return false;
   if (Array.isArray(state.legacyV1?.reviewBuckets) && state.legacyV1.reviewBuckets.length > 0) return false;
+  if (Array.isArray(state.debts) && state.debts.length > 0) return false;
+  if (Array.isArray(state.goals) && state.goals.length > 0) return false;
+  if (Array.isArray(state.travel?.visited) && state.travel.visited.length > 0) return false;
+  if (Array.isArray(state.travel?.destinations) && state.travel.destinations.length > 0) return false;
+  if (Array.isArray(state.scriptures) && state.scriptures.length > 0) return false;
+  if (state.monthly?.history && typeof state.monthly.history === 'object' && Object.keys(state.monthly.history).length > 0) return false;
+  if (Array.isArray(state.providerSnapshot?.accounts) && state.providerSnapshot.accounts.length > 0) return false;
+  if (Array.isArray(state.providerSnapshot?.recurring) && state.providerSnapshot.recurring.length > 0) return false;
+  if (isCalendarDate(state.providerSnapshot?.asOf)) return false;
   return true;
 }
 
@@ -276,6 +288,12 @@ function systemBucket(definition, order, now) {
   };
 }
 
+const SYSTEM_BUCKET_DEFINITIONS = Object.freeze([
+  {id:SYSTEM_BUCKET_IDS.income, name:'Income', semanticType:'income', description:'Classifies money coming in; it is not a spending-plan bucket.'},
+  {id:SYSTEM_BUCKET_IDS.transfer, name:'Money Transfer', semanticType:'transfer', description:'Classifies movement between your accounts; it is neither income nor spending.'},
+  {id:SYSTEM_BUCKET_IDS.debtPayment, name:'Debt Payment', semanticType:'debt_payment', description:'Classifies debt repayment separately from ordinary discretionary spending.'}
+]);
+
 // Schema 8 only seeds everyday buckets for a genuinely brand-new empty vault.
 // Any legacy review, category, domain, transaction, allocation, rule, snapshot,
 // reimbursement, or audit record prevents seeding. System classifications are
@@ -285,9 +303,26 @@ function initializeDesktopBetaBucketWorkflow(state, {now, freshVaultAtStart = fa
   const isFreshVault = freshVaultAtStart;
   initializeDomainStore(state, {now});
   const domain = state.domain;
+  const alreadySystemIds = new Set();
+  for (const definition of SYSTEM_BUCKET_DEFINITIONS) {
+    const existing = domain.buckets.find(bucket => bucket.id === definition.id);
+    if (!existing) continue;
+    const alreadySystem = existing.system === true && existing.protected === true
+      && existing.parentId === null && existing.semanticType === definition.semanticType;
+    // This covers a safely repeated recovery migration. Any other collision
+    // is a user-owned bucket that must not be overwritten merely because its
+    // ID matches a reserved V2B ID.
+    if (!alreadySystem) {
+      throw new Error(`Schema 7 vault uses reserved system bucket id ${definition.id}; migration stopped without modifying the vault.`);
+    }
+    alreadySystemIds.add(definition.id);
+  }
   for (const bucket of domain.buckets) {
-    bucket.semanticType = BUCKET_SEMANTIC_TYPES.has(bucket.semanticType) ? bucket.semanticType : 'spending';
-    bucket.system = Boolean(bucket.system);
+    if (alreadySystemIds.has(bucket.id)) continue;
+    // Schema 7 did not support classifications. Treat every existing user
+    // bucket as ordinary spending rather than trusting partial forward fields.
+    bucket.semanticType = 'spending';
+    bucket.system = false;
   }
 
   if (isFreshVault) {
@@ -300,17 +335,10 @@ function initializeDesktopBetaBucketWorkflow(state, {now, freshVaultAtStart = fa
     }
   }
 
-  const definitions = [
-    {id:SYSTEM_BUCKET_IDS.income, name:'Income', semanticType:'income', description:'Classifies money coming in; it is not a spending-plan bucket.'},
-    {id:SYSTEM_BUCKET_IDS.transfer, name:'Money Transfer', semanticType:'transfer', description:'Classifies movement between your accounts; it is neither income nor spending.'},
-    {id:SYSTEM_BUCKET_IDS.debtPayment, name:'Debt Payment', semanticType:'debt_payment', description:'Classifies debt repayment separately from ordinary discretionary spending.'}
-  ];
   let nextOrder = Math.max(-1, ...domain.buckets.filter(bucket => !bucket.parentId).map(bucket => Number(bucket.order) || 0)) + 1;
-  for (const definition of definitions) {
+  for (const definition of SYSTEM_BUCKET_DEFINITIONS) {
     const existing = domain.buckets.find(bucket => bucket.id === definition.id);
-    if (existing) {
-      Object.assign(existing, systemBucket(definition, existing.order, now));
-    } else {
+    if (!existing) {
       domain.buckets.push(systemBucket(definition, nextOrder++, now));
     }
   }
