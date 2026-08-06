@@ -155,6 +155,9 @@ export class LocalVaultRepository {
       return envelope;
     } catch (cause) {
       if (cause instanceof DesktopVaultError) throw cause;
+      // A file can disappear after the user has selected it in the native panel.
+      // That is a selected-backup read failure, not an absent active vault.
+      if (cause?.code === 'ENOENT') throw error('FILE_READ_FAILED', 'Money Moves could not read the selected backup.');
       if (cause instanceof SyntaxError) throw error('INVALID_BACKUP', 'The selected file is not a valid Money Moves encrypted backup.');
       throw mapFileError(cause, 'read');
     }

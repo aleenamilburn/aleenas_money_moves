@@ -20,6 +20,8 @@ test('Faith & Money reader contract exposes accessible overview, journal, histor
   assert.match(app, /saveDevotionalResponses/);
   assert.match(app, /completeDevotional/);
   assert.match(app, /advanceToNextDevotional/);
+  assert.match(app, /state=restored\.state;[^\n]+\n\s+devotionalDraft=null;devotionalDraftDirty=false;/,
+    'successful restore must discard the superseded in-memory devotional draft');
   assert.match(css, /\.devotional-layout/);
   assert.match(css, /\.devotional-prompts/);
   assert.match(css, /@media\(max-width:760px\).*\.devotional-actions/s);

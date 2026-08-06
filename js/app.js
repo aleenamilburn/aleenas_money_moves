@@ -28,6 +28,11 @@ import {
   toggleSavedDevotional,
   validateDevotionalDraft
 } from './services/devotionalService.js';
+import {
+  DESKTOP_BACKUP_RESTORE_MESSAGES,
+  DESKTOP_BACKUP_RESTORE_OUTCOME,
+  runDesktopBackupRestore
+} from './services/desktopBackupRestore.js';
 const isDesktopProtocol = window.location.protocol === 'money-moves:';
 const isDesktop = isDesktopProtocol && Boolean(globalThis.moneyMovesDesktop?.vault);
 const startupFailure = desktopStartupFailure({isDesktopProtocol, hasDesktopBridge:isDesktop});
@@ -70,6 +75,7 @@ let allocationEditorSource = null;
 let devotionalDraft = null;
 let devotionalDraftDirty = false;
 let devotionalActionBusy = false;
+let desktopBackupRestoreBusy = false;
 let reviewChildChooser = null;
 let externalVaultChangeObserved = false;
 let localRecoveryStatus = {encryptedVault:false, encryptedVaultCorrupt:false, legacyState:false};
@@ -879,17 +885,35 @@ async function importSelectedFile(file) {
 }
 
 async function restoreDesktopBackup({recovery = false} = {}) {
-  const raw = await vaultRepository.importEncryptedBackup();
-  if (!raw) return;
-  const passphrase=prompt('Enter the passphrase for this encrypted backup.');
-  if (!passphrase || !confirm('Replace this local encrypted vault with the selected backup?')) return;
+  if (desktopBackupRestoreBusy) return;
+  desktopBackupRestoreBusy = true;
+  $('restoreBackup').disabled = true;
+  const recoveryButton = $('restoreRecoveryBackup');
+  if (recoveryButton) recoveryButton.disabled = true;
+  setMessage('vaultBackupMessage','Opening encrypted backup…');
   try {
-    const restored=await stateService.restore(raw,passphrase,{expectedVaultGeneration:recovery ? undefined : vaultGeneration});
+    const result = await runDesktopBackupRestore({
+      importEncryptedBackup:() => vaultRepository.importEncryptedBackup(),
+      requestPassphrase:() => prompt('Enter the passphrase for this encrypted backup.'),
+      confirmRestore:() => confirm('Replace this local encrypted vault with the selected backup?'),
+      restore:(raw, passphrase) => stateService.restore(raw,passphrase,{expectedVaultGeneration:recovery ? undefined : vaultGeneration})
+    });
+    if (result.kind !== DESKTOP_BACKUP_RESTORE_OUTCOME.RESTORED) {
+      if (result.conflict) showVaultConflict();
+      setMessage('vaultBackupMessage',DESKTOP_BACKUP_RESTORE_MESSAGES[result.kind] || DESKTOP_BACKUP_RESTORE_MESSAGES.import_failed,result.kind === DESKTOP_BACKUP_RESTORE_OUTCOME.IMPORT_FAILED || result.kind === DESKTOP_BACKUP_RESTORE_OUTCOME.RESTORE_FAILED);
+      return;
+    }
+    const restored=result.restored;
     state=restored.state;activeKey=restored.key;keyMeta=restored.meta;vaultGeneration=restored.vaultGeneration;
-    hideVaultConflict();enterApp();alert('Backup restored.');
-  } catch(error) {
-    if (error?.code === 'VAULT_CONFLICT') { showVaultConflict();alert(error.message); }
-    else alert('The backup or passphrase could not be verified. The current vault was not changed.');
+    devotionalDraft=null;devotionalDraftDirty=false;
+    hideVaultConflict();enterApp();
+    setMessage('vaultBackupMessage','Encrypted backup restored.');
+  } catch {
+    setMessage('vaultBackupMessage',DESKTOP_BACKUP_RESTORE_MESSAGES.import_failed,true);
+  } finally {
+    desktopBackupRestoreBusy = false;
+    $('restoreBackup').disabled = false;
+    if (recoveryButton) recoveryButton.disabled = false;
   }
 }
 
@@ -1060,7 +1084,7 @@ function bindEvents() {
     try {
       if (isDesktop) {
         const result = await stateService.exportEncryptedBackup();
-        if (!result?.cancelled) alert('Encrypted backup exported. Keep it with its passphrase.');
+        setMessage('vaultBackupMessage',result?.cancelled ? 'Backup export canceled.' : 'Encrypted backup exported. Keep it with its passphrase.');
         return;
       }
       const blob=new Blob([await stateService.exportEncryptedBackup()],{type:'application/json'});
@@ -1068,7 +1092,10 @@ function bindEvents() {
       link.href=URL.createObjectURL(blob);
       link.download=`money-moves-backup-${new Date().toISOString().slice(0,10)}.json`;
       link.click();URL.revokeObjectURL(link.href);
-    } catch(error){alert(error.message);}
+    } catch(error){
+      if (isDesktop) setMessage('vaultBackupMessage','Could not export the encrypted backup. Your current vault was not changed.',true);
+      else alert(error.message);
+    }
   });
   $('restoreBackup').addEventListener('click',async()=>{
     if (!isDesktop) return $('restoreFile').click();

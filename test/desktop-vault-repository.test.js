@@ -101,6 +101,23 @@ test('backup import rejects an unsafe path and accepts only an encrypted .mmvaul
   await fs.writeFile(legacy, await createLegacyV1Envelope({schemaVersion:1}, 'legacy desktop import passphrase', deriveDesktopVaultKey), {mode:0o600});
   assert.equal((await repository.importFrom(legacy)).version, 1);
   await assert.rejects(repository.importFrom(path.join(baseDirectory, 'synthetic.json')), error => error.code === 'INVALID_BACKUP');
+  await assert.rejects(repository.importFrom(path.join(baseDirectory, 'selected-then-missing.mmvault')), error => error.code === 'FILE_READ_FAILED');
+});
+
+test('a copied synthetic backup atomically replaces the active envelope and survives a new repository instance', async t => {
+  const {baseDirectory, repository} = await temporaryRepository();
+  t.after(() => fs.rm(baseDirectory, {recursive:true, force:true}));
+  const alpha = envelope(1);
+  const beta = envelope(2);
+  const copiedBackup = path.join(baseDirectory, 'copied-synthetic-alpha.mmvault');
+  await fs.writeFile(copiedBackup, JSON.stringify(alpha), {mode:0o600});
+  await repository.create(beta);
+
+  const selected = await repository.importFrom(copiedBackup);
+  await repository.restore(selected, {expectedVaultGeneration:beta.vaultGeneration});
+  const relaunched = new LocalVaultRepository({baseDirectory});
+  assert.deepEqual((await relaunched.load()).encryptedEnvelope, alpha);
+  assert.deepEqual(JSON.parse(await fs.readFile(repository.layout.previous, 'utf8')), beta);
 });
 
 test('overlapping saves serialize locally and an external active replacement is not overwritten', async t => {

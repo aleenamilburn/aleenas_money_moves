@@ -3,6 +3,7 @@ import test from 'node:test';
 import {STATE_SCHEMA_VERSION} from '../js/domain/constants.js';
 import {validateDomainStore} from '../js/domain/models.js';
 import {migrateState} from '../js/domain/migrations.js';
+import {createStateService} from '../js/services/stateService.js';
 import {
   DEVOTIONAL_ERROR_CODES,
   DevotionalServiceError,
@@ -69,6 +70,69 @@ test('a malformed pre-existing devotional state fails safely before a schema 8 m
   );
 });
 
+test('schema 8 migration rejects impossible devotional progression and schema 9 migration is idempotent', () => {
+  const schema8 = state();
+  schema8.schemaVersion = 8;
+  schema8.domain.devotionalState = {
+    activeDevotionalId:'faith-money-mammon',
+    rotationStartedAt:NOW,
+    lastOpenedAt:null,
+    completedDevotionalIds:['faith-money-stewardship'],
+    savedDevotionalIds:[],
+    entries:[{
+      id:'impossible-completion',
+      devotionalId:'faith-money-stewardship',
+      promptResponses:[],
+      privateNotes:'',
+      startedAt:NOW,
+      updatedAt:NOW,
+      completedAt:NOW,
+      contentVersion:1
+    }]
+  };
+  assert.throws(
+    () => migrateState(schema8, {now:NEXT}),
+    /Pre-migration state failed foundation validation/
+  );
+
+  const schema9 = state();
+  const repeated = migrateState(schema9, {now:NEXT});
+  assert.equal(repeated.changed, false);
+  assert.deepEqual(repeated.applied, []);
+  assert.deepEqual(repeated.state, schema9);
+});
+
+test('schema 8 encrypted-backup contents migrate during restore without replacing data before verification', async () => {
+  const schema8 = state();
+  schema8.schemaVersion = 8;
+  delete schema8.domain.devotionalState;
+  let saved = null;
+  const repository = {
+    async readVaultGeneration() { return 'current-generation'; },
+    async verifyBackup(raw, passphrase) {
+      assert.equal(raw, 'synthetic-encrypted-backup');
+      assert.equal(passphrase, 'synthetic passphrase');
+      return {state:structuredClone(schema8), key:'synthetic-key', meta:{vaultSequence:4}, vaultGeneration:'backup-generation'};
+    },
+    async readVaultMetadata() { return {vaultSequence:8}; },
+    async save(nextState, key, meta, options) {
+      saved = {nextState:structuredClone(nextState), key, meta, options};
+      return {meta:{vaultSequence:9}, vaultGeneration:'restored-generation'};
+    }
+  };
+  const restored = await createStateService({repository, migrate:migrateState}).restore(
+    'synthetic-encrypted-backup',
+    'synthetic passphrase',
+    {expectedVaultGeneration:'current-generation'}
+  );
+  assert.equal(restored.state.schemaVersion, STATE_SCHEMA_VERSION);
+  assert.equal(restored.state.domain.devotionalState.activeDevotionalId, 'faith-money-mammon');
+  assert.deepEqual(restored.state.domain.devotionalState.entries, []);
+  assert.equal(saved.key, 'synthetic-key');
+  assert.equal(saved.options.expectedVaultGeneration, 'current-generation');
+  assert.equal(saved.options.nextVaultSequence, 9);
+});
+
 test('responses and private notes save atomically, retain a content version, and support edits', async () => {
   const vault = state();
   const initialRevision = vault.stateRevision;
@@ -112,6 +176,20 @@ test('completion works without answers, saved history is explicit, and progressi
   assert.equal(history[1].isActive, true);
   assert.equal(reopenDevotional(vault, first.id).entry.id, 'entry-complete');
   assert.equal(saved.calls(), 3);
+});
+
+test('a repeated completion is rejected without advancing revision or persistence', async () => {
+  const vault = state();
+  const saved = persistCounter();
+  const first = getActiveDevotional(vault);
+  await completeDevotional(vault, {expectedRevision:vault.stateRevision, devotionalId:first.id}, saved.persist, {now:NOW, idFactory:() => 'entry-once'});
+  const before = structuredClone(vault);
+  await assert.rejects(
+    () => completeDevotional(vault, {expectedRevision:vault.stateRevision, devotionalId:first.id}, saved.persist, {now:NEXT}),
+    error => error instanceof DevotionalServiceError && error.code === DEVOTIONAL_ERROR_CODES.DEVOTIONAL_ALREADY_COMPLETED
+  );
+  assert.deepEqual(vault, before);
+  assert.equal(saved.calls(), 1);
 });
 
 test('stale, invalid, oversized, and failed devotional saves never leak journal text or mutate the vault', async () => {

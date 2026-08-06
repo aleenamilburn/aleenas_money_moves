@@ -83,8 +83,8 @@ If contentment feels distant, begin with attention rather than emotion. Notice o
   }),
   devotional({
     id:'faith-money-generosity', sequence:4, theme:'Generosity', title:'A Freely Chosen Gift',
-    verseReference:'2 Corinthians 9:7–8',
-    verseText:'Let each man give according as he has determined in his heart, not grudgingly or under compulsion, for God loves a cheerful giver. And God is able to make all grace abound to you, that you, always having all sufficiency in everything, may abound to every good work.',
+    verseReference:'2 Corinthians 9:7',
+    verseText:'Let each man give according as he has determined in his heart, not grudgingly or under compulsion, for God loves a cheerful giver.',
     devotionalText:`Generosity is not a performance for God or other people. It is a response of freedom. The passage does not describe a giver pressured into proving sincerity. It describes a person who considers, decides, and gives from the heart. That matters because guilt can produce activity without love, while freedom makes room for honest care.
 
 Generosity also looks different in different seasons. Someone carrying urgent bills, caregiving duties, unemployment, or debt may not have the same financial capacity as someone with a wider margin. A generous life is not measured by a public number. It can include money, but also time, hospitality, attention, expertise, advocacy, encouragement, and a willingness to notice another person’s need.
@@ -228,7 +228,7 @@ Where you are unsure, seek qualified counsel rather than using secrecy as a subs
   devotional({
     id:'faith-money-comparison', sequence:10, theme:'Comparison', title:'Your Own Faithful Work',
     verseReference:'Galatians 6:4–5',
-    verseText:'But let each man examine his own work, and then he will have something to boast in himself, and not in someone else. For each man will bear his own burden.',
+    verseText:'But let each man examine his own work, and then he will have reason to boast in himself, and not in someone else. For each man will bear his own burden.',
     devotionalText:`Comparison turns another person’s visible life into a scorecard for our own. Money gives comparison many tools: salaries, homes, weddings, cars, vacations, gifts, investments, and social media glimpses. We can feel superior, behind, resentful, or ashamed before we even know the actual story behind the image.
 
 The invitation here is to examine your own work. That is not isolation. It is a return to reality. You have a particular history, set of obligations, abilities, needs, and relationships. Another person’s provision may be worth celebrating, but it cannot tell you what faithfulness requires of you today.
@@ -303,21 +303,36 @@ export function devotionalById(id) {
   return FAITH_MONEY_DEVOTIONALS.find(item => item.id === id) || null;
 }
 
+function primaryPassageKeys(reference) {
+  const match = /^(.+?)\s+(\d+):(\d+)(?:[–-](\d+))?$/.exec(String(reference || '').trim());
+  if (!match) return [];
+  const [, book, chapter, firstVerse, finalVerse = firstVerse] = match;
+  const start = Number(firstVerse);
+  const end = Number(finalVerse);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start) return [];
+  return Array.from({length:end - start + 1}, (_unused, offset) => `${book}|${chapter}|${start + offset}`);
+}
+
 export function validateFaithMoneyDevotionalLibrary(library = FAITH_MONEY_DEVOTIONALS) {
   const errors = [];
   if (!Array.isArray(library) || library.length !== 12) return {ok:false, errors:['The Faith & Money library must contain exactly twelve devotionals.']};
   const ids = new Set();
   const sequences = new Set();
-  const passages = new Set();
+  const primaryPassages = new Set();
   for (const item of library) {
     if (!item || typeof item !== 'object') { errors.push('Every devotional must be an object.'); continue; }
-    for (const field of ['id', 'title', 'theme', 'verseReference', 'translation', 'verseText', 'devotionalText', 'contentVersion']) {
+    for (const field of ['id', 'title', 'theme', 'verseReference', 'translation', 'translationAttribution', 'verseText', 'devotionalText', 'contentVersion']) {
       if (item[field] === undefined || item[field] === null || item[field] === '') errors.push(`${item.id || 'unknown'} is missing ${field}.`);
     }
     if (ids.has(item.id)) errors.push(`Duplicate devotional id ${item.id}.`); else ids.add(item.id);
     if (!Number.isSafeInteger(item.sequence) || item.sequence < 1 || sequences.has(item.sequence)) errors.push(`Invalid devotional sequence for ${item.id}.`); else sequences.add(item.sequence);
-    if (passages.has(item.verseReference)) errors.push(`Duplicate primary passage ${item.verseReference}.`); else passages.add(item.verseReference);
+    const passageKeys = primaryPassageKeys(item.verseReference);
+    if (!passageKeys.length) errors.push(`${item.id} has an invalid primary passage reference.`);
+    else if (passageKeys.some(key => primaryPassages.has(key))) errors.push(`Duplicate primary passage ${item.verseReference}.`);
+    for (const key of passageKeys) primaryPassages.add(key);
     if (item.translation !== DEVOTIONAL_TRANSLATION) errors.push(`${item.id} must use ${DEVOTIONAL_TRANSLATION}.`);
+    if (item.translationAttribution !== DEVOTIONAL_TRANSLATION_ATTRIBUTION) errors.push(`${item.id} must use the required WEB attribution.`);
+    if (!Number.isSafeInteger(item.contentVersion) || item.contentVersion < 1) errors.push(`${item.id} must have a positive integer contentVersion.`);
     if (!Array.isArray(item.prompts) || item.prompts.length !== 3) errors.push(`${item.id} must have exactly three prompts.`);
     const promptIds = new Set();
     for (const prompt of item.prompts || []) {
@@ -328,7 +343,7 @@ export function validateFaithMoneyDevotionalLibrary(library = FAITH_MONEY_DEVOTI
     const words = String(item.devotionalText || '').trim().split(/\s+/).filter(Boolean).length;
     if (words < 350 || words > 650) errors.push(`${item.id} reflection must be 350–650 words.`);
     const serialized = JSON.stringify(item);
-    if (/(?:https?:\/\/|javascript:|<script|<iframe)/i.test(serialized)) errors.push(`${item.id} contains prohibited executable or remote content.`);
+    if (/(?:https?:\/\/|www\.|javascript:|<[^>]*>|on[a-z]+\s*=)/i.test(serialized)) errors.push(`${item.id} contains prohibited executable or remote content.`);
     if (/Joyce Meyer/i.test(serialized)) errors.push(`${item.id} contains prohibited third-party attribution.`);
   }
   for (let sequence = 1; sequence <= 12; sequence += 1) if (!sequences.has(sequence)) errors.push(`Missing devotional sequence ${sequence}.`);

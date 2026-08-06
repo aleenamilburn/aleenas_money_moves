@@ -17,6 +17,7 @@ export const DEVOTIONAL_ERROR_CODES = Object.freeze({
   INVALID_RESPONSE:'INVALID_RESPONSE',
   INVALID_PRIVATE_NOTES:'INVALID_PRIVATE_NOTES',
   ACTIVE_DEVOTIONAL_REQUIRED:'ACTIVE_DEVOTIONAL_REQUIRED',
+  DEVOTIONAL_ALREADY_COMPLETED:'DEVOTIONAL_ALREADY_COMPLETED',
   ACTIVE_DEVOTIONAL_NOT_COMPLETE:'ACTIVE_DEVOTIONAL_NOT_COMPLETE',
   NO_NEXT_DEVOTIONAL:'NO_NEXT_DEVOTIONAL',
   PERSISTENCE_FAILED:'PERSISTENCE_FAILED',
@@ -299,6 +300,9 @@ export async function completeDevotional(state, {expectedRevision, devotionalId}
     ensureActive(d, devotionalId);
     const progress = d.devotionalState;
     let entry = entryFor(d, devotionalId);
+    if (progress.completedDevotionalIds.includes(devotionalId) || entry?.completedAt) {
+      throw serviceError(DEVOTIONAL_ERROR_CODES.DEVOTIONAL_ALREADY_COMPLETED, 'This devotional is already complete.');
+    }
     if (!entry) {
       entry = {
         id:nextEntryId(options, d),

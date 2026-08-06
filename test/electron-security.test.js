@@ -21,9 +21,9 @@ function pngChunkTypes(png) {
 }
 
 test('Electron main, preload, Forge, and packaged HTML enforce the desktop security baseline', async () => {
-  const [main, preload, forge, html, adapter, startupStatus, startupService, iconSource, icon] = await Promise.all([
+  const [main, preload, forge, html, adapter, restoreCoordinator, startupStatus, startupService, iconSource, icon] = await Promise.all([
     read('electron/main.js'), read('electron/preload.cjs'), read('forge.config.js'), read('index.html'), read('js/services/desktopVaultRepository.js'),
-    read('js/startup-status.js'), read('js/services/desktopStartup.js'), readBuffer('assets/brand/money-moves-mark.png'), readBuffer('assets/icons/macos/icon.icns')
+    read('js/services/desktopBackupRestore.js'), read('js/startup-status.js'), read('js/services/desktopStartup.js'), readBuffer('assets/brand/money-moves-mark.png'), readBuffer('assets/icons/macos/icon.icns')
   ]);
   for (const setting of ['nodeIntegration:false', 'contextIsolation:true', 'sandbox:true', 'webSecurity:true', 'allowRunningInsecureContent:false', 'experimentalFeatures:false']) assert.match(main, new RegExp(setting));
   assert.match(main, /protocol\.handle\(APP_PROTOCOL/);
@@ -32,6 +32,8 @@ test('Electron main, preload, Forge, and packaged HTML enforce the desktop secur
   assert.match(main, /setPermissionRequestHandler/);
   assert.match(main, /requestSingleInstanceLock/);
   assert.match(main, /requireTrustedRenderer/);
+  assert.match(main, /status:'selected'/);
+  assert.match(main, /status:'cancelled'/);
   assert.match(preload, /contextBridge\.exposeInMainWorld\('moneyMovesDesktop'/);
   assert.doesNotMatch(preload, /invoke:\s*\(/);
   assert.doesNotMatch(preload, /exposeInMainWorld\([^\n]*ipcRenderer/);
@@ -58,4 +60,7 @@ test('Electron main, preload, Forge, and packaged HTML enforce the desktop secur
   for (const metadataType of ['caBX', 'eXIf', 'iTXt', 'tEXt', 'zTXt']) assert.ok(!iconChunks.includes(metadataType), `unexpected icon metadata: ${metadataType}`);
   for (const type of ['icp4', 'icp5', 'icp6', 'ic07', 'ic08', 'ic09', 'ic10']) assert.ok(icon.includes(type), `missing ${type} icon representation`);
   assert.doesNotMatch(adapter, /hostedVaultStorage|supabase/i);
+  assert.match(adapter, /serializeSelectedBackup/);
+  assert.match(restoreCoordinator, /IMPORT_FAILED/);
+  assert.doesNotMatch(restoreCoordinator, /console\./);
 });

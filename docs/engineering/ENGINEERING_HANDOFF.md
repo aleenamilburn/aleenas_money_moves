@@ -49,26 +49,26 @@ inspection (287 filesystem files and 42 ASAR entries). The direct ARM64 bundle
 and read-only mounted DMG were verified; the recorded founder A–F synthetic
 matrix remains PASS.
 
-## Faith & Money devotional candidate
+## Accepted Faith & Money devotionals
 
-`FAITH_AND_MONEY_DEVOTIONALS_IMPLEMENTATION.md` records the schema-9 candidate. It adds an original, static, public-domain-WEB devotional library; optional user reflections and progress remain inside the authoritative encrypted local vault. The new reader, history, deterministic progression, dirty-draft guard, validation, and rollback service are implemented. Candidate automated validation passed (182 unit tests, 27 Electron tests, syntax/compile/diff/content checks, ARM64 package/DMG/ZIP, and package inspection). The direct bundle passed create/save/relaunch/unlock/complete/next/history using a disposable profile; the mounted read-only DMG passed fresh-vault, Overview, reader, library, and prompt rendering, with byte-identical `app.asar`. Independent acceptance must still run the native-dialog backup/change/restore round trip plus remaining privacy and layout checks.
+`FAITH_AND_MONEY_DEVOTIONALS_ACCEPTANCE.md` records final schema-9 acceptance. The original static public-domain-WEB library, encrypted optional journaling, reader/history, deterministic progression, validation, migration, and rollback are accepted. Independent review hardened content validation, impossible/repeated progression, native import results, selected-file errors, and sanitized restore outcomes. The matrix found and corrected a stale renderer draft after restore; successful restore now clears superseded devotional draft memory before rendering restored authority.
 
-Signing/notarization remains technically unblocked by the devotional code but should wait for this candidate’s independent acceptance and remaining release-Mac checks. Plaid remains the next major integration only after devotional acceptance; travel work remains deferred.
+Fresh automated validation passed with 198 full tests and 38 Electron-focused tests, zero failures/skips. Fresh unsigned ARM64 app, DMG, and ZIP passed inspection (286 filesystem files, 46 ASAR entries). Direct and mounted-DMG apps had byte-identical ASARs and both passed native Alpha→Beta→wrong-passphrase→confirmed Alpha restore→relaunch using separate disposable profiles. Signing/notarization and V3 architecture planning may begin; release-Mac Finder/Dock appearance remains a low-risk follow-up. Plaid, travel, cloud backup/sync, phone, and shared-vault implementation remain outside this acceptance.
 
 ## Validation evidence
 
 - `CI=true pnpm run check`: passed.
-- `CI=true pnpm run electron:test`: 27 passed, 0 failed.
-- `CI=true pnpm test`: 173 passed, 0 failed.
+- `CI=true pnpm run electron:test`: 38 passed, 0 failed, 0 skipped.
+- `CI=true pnpm test`: 198 passed, 0 failed, 0 skipped.
 - `CI=true pnpm run electron:package`: ARM64 macOS package passed.
 - `CI=true pnpm run electron:make`: unsigned ARM64 DMG and ZIP passed.
-- `CI=true pnpm run inspect:package`: passed (287 filesystem files and 42 ASAR entries scanned).
-- The current rebuilt direct app and mounted-DMG app each launched with a disposable synthetic profile. Five CSV rows rendered in Weekly Review; at a 720px viewport, scroll width remained 720px, parent choices and the Split/Allocation action did not overlap, and the split editor opened/canceled without mutation. No unexpected renderer or main-process error was observed. The direct bundle, mounted read-only DMG app, and extracted ZIP app matched the canonical ICNS byte-for-byte; the DMG detached cleanly. Founder A–F is now recorded PASS, but Finder/Dock/application-switcher cache appearance was not re-observed in this run. Independent V2B acceptance remains required.
+- `CI=true pnpm run inspect:package`: passed (286 filesystem files and 46 ASAR entries scanned).
+- `python3 -m py_compile start.py`, `git diff --check`, and `CI=true pnpm run content:validate`: passed.
+- Direct and mounted-DMG native backup/restore, wrong-passphrase preservation, explicit confirmation, relaunch persistence, supported compact layout, privacy scans, and financial regression are recorded in `FAITH_AND_MONEY_DEVOTIONALS_ACCEPTANCE.md`.
 
 ## Recommended next task
 
-Perform independent Faith & Money acceptance, starting with the outstanding
-native-dialog encrypted backup/change/restore round trip and the remaining
-privacy/layout checks. After devotional acceptance, Plaid may be scoped as the
-next major integration. Do not begin cloud backup, hosted sync, phone support,
-shared vaults, or travel work without separately approved phases.
+Prepare signing/notarization and the release-Mac visual pass, or begin the
+separately documented V3 architecture phase. Do not begin Plaid, cloud backup,
+hosted sync, phone support, shared vaults, or travel implementation without a
+separately approved scope and acceptance plan.

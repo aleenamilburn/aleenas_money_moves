@@ -118,6 +118,17 @@ function mapError(cause) {
   return new DesktopVaultError(supported.has(code) ? code : 'PERSISTENCE_FAILED');
 }
 
+function serializeSelectedBackup(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) throw new DesktopVaultError('PERSISTENCE_FAILED');
+  if (result.status === 'cancelled') return null;
+  if (result.status !== 'selected' || !result.encryptedEnvelope || typeof result.encryptedEnvelope !== 'object' || Array.isArray(result.encryptedEnvelope)) {
+    throw new DesktopVaultError('PERSISTENCE_FAILED');
+  }
+  const raw = JSON.stringify(result.encryptedEnvelope);
+  if (typeof raw !== 'string' || !raw) throw new DesktopVaultError('PERSISTENCE_FAILED');
+  return raw;
+}
+
 async function readRecord() {
   try {
     const result = await desktopApi().read();
@@ -208,8 +219,7 @@ export function createDesktopVaultRepository() {
     async importEncryptedBackup() {
       try {
         const result = await desktopApi().importBackup();
-        if (result?.cancelled) return null;
-        return JSON.stringify(result?.encryptedEnvelope);
+        return serializeSelectedBackup(result);
       } catch (cause) { throw mapError(cause); }
     },
     async verifyBackup(raw, passphrase) {

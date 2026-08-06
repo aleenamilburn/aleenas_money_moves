@@ -86,8 +86,8 @@ function registerIpc() {
       filters:[{name:'Money Moves encrypted backup', extensions:['mmvault']}],
       properties:['openFile']
     });
-    if (result.canceled || result.filePaths.length !== 1) return {cancelled:true};
-    return {cancelled:false, encryptedEnvelope:await vaultRepository.importFrom(result.filePaths[0])};
+    if (result.canceled || result.filePaths.length !== 1) return {status:'cancelled'};
+    return {status:'selected', encryptedEnvelope:await vaultRepository.importFrom(result.filePaths[0])};
   });
   invoke('money-moves:app:version', () => app.getVersion());
   invoke('money-moves:app:platform', () => process.platform);

@@ -2,7 +2,7 @@ import {
   BUCKET_SEMANTIC_TYPES, DEFAULT_CURRENCY, DEVOTIONAL_PRIVATE_NOTES_MAX_CHARS,
   DEVOTIONAL_RESPONSE_MAX_CHARS, SYSTEM_BUCKET_IDS, UNKNOWN_ACCOUNT_ID
 } from './constants.js';
-import {devotionalById} from '../content/faithMoneyDevotionals.js';
+import {FAITH_MONEY_DEVOTIONALS, devotionalById} from '../content/faithMoneyDevotionals.js';
 
 export const ACCOUNT_TYPES = new Set(['cash', 'credit', 'loan', 'savings', 'investment', 'unknown']);
 export const TRANSACTION_SOURCES = new Set(['manual', 'csv', 'migration']);
@@ -257,6 +257,21 @@ export function validateDevotionalState(value) {
   };
   validateIdList(value.completedDevotionalIds, 'completedDevotionalIds');
   validateIdList(value.savedDevotionalIds, 'savedDevotionalIds');
+  const activeDevotional = devotionalById(value.activeDevotionalId);
+  if (activeDevotional && Array.isArray(value.completedDevotionalIds)) {
+    // Completion is a contiguous prefix of the static library. The active item
+    // may be the one just completed (before an explicit Continue action), but
+    // no vault can legitimately skip ahead or mark a later item complete.
+    const completedCount = value.completedDevotionalIds.length;
+    const permittedCounts = new Set([activeDevotional.sequence - 1, activeDevotional.sequence]);
+    if (!permittedCounts.has(completedCount)) errors.push('completedDevotionalIds must match the active devotional progression');
+    const expectedCompletedIds = FAITH_MONEY_DEVOTIONALS
+      .filter(item => item.sequence <= completedCount)
+      .map(item => item.id);
+    if (expectedCompletedIds.some(id => !value.completedDevotionalIds.includes(id))) {
+      errors.push('completedDevotionalIds must be a contiguous library prefix');
+    }
+  }
   const entryIds = new Set();
   const entryDevotionalIds = new Set();
   for (const entry of value.entries || []) {
